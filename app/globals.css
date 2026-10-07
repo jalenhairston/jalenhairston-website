@@ -1,0 +1,73 @@
+@import "tailwindcss";
+
+/* Design tokens — the planned redesign should only need to change this block. */
+@theme {
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-ink: #0f172a;
+  --color-muted: #475569;
+  --color-line: #e2e8f0;
+  --color-accent: #1e3a8a;
+  --color-accent-ink: #ffffff;
+  --color-tag: #eef2f7;
+
+  --radius-card: 1.75rem;
+  --radius-pill: 9999px;
+  --shadow-soft: 0 1px 2px rgb(15 23 42 / 0.04), 0 12px 32px -12px rgb(15 23 42 / 0.12);
+  --container-content: 60rem;
+
+  --font-sans: var(--font-geist-sans);
+}
+
+:root {
+  /* Reserved for the run-3 ask bar so it never covers the last content. */
+  --ask-bar-height: 4.5rem;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-ink);
+}
+
+main {
+  padding-bottom: calc(var(--ask-bar-height) + 2rem);
+}
+
+:focus-visible {
+  outline: 3px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+/* Rendered markdown bodies. */
+.prose-body p + p {
+  margin-top: 1rem;
+}
+.prose-body a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  [data-print-hide] {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
+  main {
+    padding-bottom: 0;
+  }
+  .shadow-soft {
+    box-shadow: none;
+  }
+}
