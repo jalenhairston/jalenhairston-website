@@ -241,12 +241,29 @@ test.describe("things-to-do map (POC)", () => {
       await page.locator('button[aria-label="Borough Market, London"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
-    const tiktok = sheet.getByRole("link", { name: /TikTok/ });
-    await expect(tiktok).toHaveAttribute("target", "_blank");
-    await expect(tiktok).toHaveAttribute("rel", "noopener noreferrer");
+    // TikTok search is listed first and opens in a new tab.
+    const links = sheet.getByRole("list").last().getByRole("link");
+    const search = links.first();
+    await expect(search).toHaveText(/TikTok/);
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Borough%20Market%20London");
+    await expect(search).toHaveAttribute("target", "_blank");
+    await expect(search).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(links.last()).toHaveText(/Instagram/);
+    // Expanded card shows more photos.
+    await expect(sheet.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(3);
     expect(await hasHorizontalScroll(page)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
+  });
+
+  test("pins show a photo thumbnail and the place name before selecting", async ({ page }) => {
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("/map");
+    const pin = page.locator('button[aria-label="Borough Market, London"]');
+    await expect(pin.locator("img")).toHaveAttribute("src", /borough-market-1\.svg$/);
+    await expect(pin).toContainText("Borough Market");
   });
 
   test("menu links to the map", async ({ page }) => {

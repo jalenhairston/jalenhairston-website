@@ -17,6 +17,7 @@ export default function MapPage() {
     lat: p.lat,
     lng: p.lng,
     description: p.body,
+    photos: p.photos,
     links: p.links,
     userAdded: false,
   }));

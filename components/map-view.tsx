@@ -7,6 +7,7 @@ import type { Map as MapLibreMap, Marker } from "maplibre-gl";
 import { useEffect, useRef, useState } from "react";
 
 export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string };
+export type Photo = { src: string; alt: string };
 export type MapPlace = {
   id: string;
   name: string;
@@ -15,6 +16,7 @@ export type MapPlace = {
   lat: number;
   lng: number;
   description: string;
+  photos: Photo[];
   links: PostLink[];
   userAdded: boolean;
 };
@@ -33,10 +35,23 @@ function platformOf(url: string): PostLink["platform"] | undefined {
   return undefined;
 }
 
+const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
+
+/** TikTok first (search link, then saved TikToks), then Instagram. */
+function orderedLinks(p: MapPlace): (PostLink & { title?: string })[] {
+  const saved = p.links.filter((l) => l.platform === "tiktok");
+  const ig = p.links.filter((l) => l.platform === "instagram");
+  return [{ platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` }, ...saved, ...ig];
+}
+
 function loadUserPlaces(): MapPlace[] {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(parsed) ? (parsed as MapPlace[]).filter((p) => typeof p?.lat === "number" && typeof p?.lng === "number") : [];
+    return Array.isArray(parsed)
+      ? (parsed as MapPlace[])
+          .filter((p) => typeof p?.lat === "number" && typeof p?.lng === "number")
+          .map((p) => ({ ...p, photos: Array.isArray(p.photos) ? p.photos : [], links: Array.isArray(p.links) ? p.links : [] }))
+      : [];
   } catch {
     return [];
   }
@@ -44,7 +59,8 @@ function loadUserPlaces(): MapPlace[] {
 
 function toMarkdown(p: MapPlace): string {
   const links = p.links.map((l) => `  - { platform: ${l.platform}, url: "${l.url}" }`).join("\n");
-  return `---\nsample: false\nname: "${p.name.replaceAll('"', '\\"')}"\ncity: "${p.city.replaceAll('"', '\\"')}"\ncategory: ${p.category}\nlat: ${p.lat.toFixed(5)}\nlng: ${p.lng.toFixed(5)}\nlinks:\n${links}\n---\n${p.description}\n`;
+  const photos = p.photos.length ? `photos:\n${p.photos.map((x) => `  - { src: "${x.src}", alt: "${x.alt.replaceAll('"', '\\"')}" }`).join("\n")}\n` : "";
+  return `---\nsample: false\nname: "${p.name.replaceAll('"', '\\"')}"\ncity: "${p.city.replaceAll('"', '\\"')}"\ncategory: ${p.category}\nlat: ${p.lat.toFixed(5)}\nlng: ${p.lng.toFixed(5)}\n${photos}links:\n${links}\n---\n${p.description}\n`;
 }
 
 export function MapView({ places }: { places: MapPlace[] }) {
@@ -93,7 +109,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
         if (places.length > 0) {
           const bounds = new maplibre.LngLatBounds();
           places.forEach((p) => bounds.extend([p.lng, p.lat]));
-          map.fitBounds(bounds, { padding: 70, maxZoom: 10, duration: 0 });
+          map.fitBounds(bounds, { padding: { top: 90, bottom: 90, left: 110, right: 110 }, maxZoom: 10, duration: 0 });
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
         map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
@@ -138,12 +154,29 @@ export function MapView({ places }: { places: MapPlace[] }) {
         el.type = "button";
         el.setAttribute("aria-label", `${p.name}, ${p.city}`);
         const active = p.id === selectedId;
-        el.className = [
-          "size-9 rounded-full border-2 border-white shadow-soft grid place-items-center text-xs font-bold transition-transform",
-          p.userAdded ? "bg-amber-500 text-black" : "bg-accent text-accent-ink",
-          active ? "scale-125" : "",
-        ].join(" ");
-        el.textContent = p.category.slice(0, 1).toUpperCase();
+        el.className = `group relative block size-14 rounded-2xl transition-transform ${active ? "scale-110" : ""}`;
+        el.style.zIndex = active ? "10" : "1";
+        const tile = document.createElement("span");
+        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] bg-surface shadow-soft ${p.userAdded ? "border-amber-500" : "border-white"}`;
+        const thumb = p.photos[0];
+        if (thumb) {
+          const img = document.createElement("img");
+          img.src = thumb.src;
+          img.alt = "";
+          img.loading = "lazy";
+          img.draggable = false;
+          img.className = "size-full object-cover";
+          tile.append(img);
+        } else {
+          tile.classList.add("grid", "place-items-center", "bg-accent", "text-accent-ink", "text-lg", "font-bold");
+          tile.textContent = p.category.slice(0, 1).toUpperCase();
+        }
+        const label = document.createElement("span");
+        label.setAttribute("aria-hidden", "true");
+        label.textContent = p.name;
+        label.className =
+          "pointer-events-none absolute top-full left-1/2 mt-1 max-w-32 -translate-x-1/2 truncate rounded-pill bg-white/90 px-2 py-0.5 text-[11px] leading-tight font-semibold text-ink shadow-soft";
+        el.append(tile, label);
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
           if (addModeRef.current) return;
@@ -265,19 +298,29 @@ export function MapView({ places }: { places: MapPlace[] }) {
               ×
             </button>
           </div>
+          {selected.photos.length > 0 && (
+            <ul aria-label="Photos" className="-mx-5 mt-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-5 pb-1">
+              {selected.photos.map((ph) => (
+                <li key={ph.src} className="shrink-0 snap-start">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={ph.src} alt={ph.alt} loading="lazy" className="h-32 w-44 rounded-2xl bg-tag object-cover" />
+                </li>
+              ))}
+            </ul>
+          )}
           {selected.description && <p className="mt-3 text-sm whitespace-pre-line">{selected.description}</p>}
           <ul className="mt-4 space-y-2">
-            {selected.links.map((l) => (
+            {orderedLinks(selected).map((l, i) => (
               <li key={l.url}>
                 <a
                   href={l.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex min-h-11 items-center justify-between gap-3 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
+                  className={`flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold ${i === 0 ? "bg-accent text-accent-ink" : "bg-tag"}`}
                 >
                   <span>
                     {PLATFORM_LABEL[l.platform]}
-                    {l.title && <span className="font-normal text-muted"> · {l.title}</span>}
+                    {l.title && <span className={`font-normal ${i === 0 ? "opacity-80" : "text-muted"}`}> · {l.title}</span>}
                   </span>
                   <span aria-hidden>↗</span>
                   <span className="sr-only">(opens in a new tab)</span>
@@ -328,14 +371,17 @@ function AddPlaceForm({
     const url = String(f.get("url") ?? "").trim();
     const platform = platformOf(url);
     if (!platform) return setError("Link must be a TikTok or Instagram URL (https://…).");
+    const photo = String(f.get("photo") ?? "").trim();
+    const name = String(f.get("name")).trim();
     onSave({
       id: `user-${Date.now()}`,
-      name: String(f.get("name")).trim(),
+      name,
       city: String(f.get("city")).trim(),
       category: String(f.get("category")),
       lat: point.lat,
       lng: point.lng,
       description: String(f.get("description") ?? "").trim(),
+      photos: photo.startsWith("https://") ? [{ src: photo, alt: name }] : [],
       links: [{ platform, url }],
       userAdded: true,
     });
@@ -370,6 +416,10 @@ function AddPlaceForm({
       <label className="block text-sm font-semibold">
         TikTok or Instagram link
         <input name="url" type="url" required inputMode="url" placeholder="https://www.tiktok.com/…" className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Photo link (optional)
+        <input name="photo" type="url" inputMode="url" placeholder="https://…/photo.jpg" className={field} />
       </label>
       <label className="block text-sm font-semibold">
         Description
