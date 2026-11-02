@@ -8,6 +8,7 @@ const links = [
   { href: "/", label: "Home" },
   { href: "/about", label: "About" },
   { href: "/resume", label: "Resume" },
+  { href: "/map", label: "Map" },
 ] as const;
 
 export function MenuPill() {

@@ -83,6 +83,21 @@ const storySchema = z.object({
   result: z.string().min(1),
 });
 
+export const placeCategories = ["food", "drinks", "coffee", "outdoors", "culture", "nightlife", "shopping", "other"] as const;
+export const postPlatforms = ["tiktok", "instagram"] as const;
+
+const placeSchema = z.object({
+  sample: z.boolean(),
+  name: z.string().min(1),
+  city: z.string().min(1),
+  category: z.enum(placeCategories),
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+  links: z
+    .array(z.object({ platform: z.enum(postPlatforms), url: z.url(), title: z.string().optional() }))
+    .min(1, "add at least one post link"),
+});
+
 /** Raw markdown is kept for the knowledge base; html is pre-rendered for pages. */
 type Body = { slug: string; body: string; html: string };
 type SampleSchema = z.ZodType<{ sample: boolean }>;
@@ -93,12 +108,14 @@ export type Profile = z.infer<typeof profileSchema> & Omit<Body, "slug">;
 export type Role = z.infer<typeof roleSchema> & Body;
 export type Project = z.infer<typeof projectSchema> & Body;
 export type Story = z.infer<typeof storySchema> & Body;
+export type Place = z.infer<typeof placeSchema> & Body;
 export type Content = {
   profile: Profile;
   skills: Skill[];
   roles: Role[];
   projects: Project[];
   stories: Story[];
+  places: Place[];
   /** Files still flagged `sample: true` (paths like "content/roles/x.md"). */
   sampleFiles: string[];
 };
@@ -145,6 +162,7 @@ export function getContent(dir: string = DEFAULT_DIR): Content {
   const roles: Role[] = collection(roleSchema, "roles");
   const projects: Project[] = collection(projectSchema, "projects");
   const stories: Story[] = collection(storySchema, "stories");
+  const places: Place[] = collection(placeSchema, "places");
 
   checkIntegrity({ skills, roles, projects, stories }, problems, (sub) => rel(path.join(/*turbopackIgnore: true*/ dir, sub)));
   if (problems.length > 0 || !profile) {
@@ -153,7 +171,7 @@ export function getContent(dir: string = DEFAULT_DIR): Content {
 
   roles.sort((a, b) => (b.end ?? "9999-12").localeCompare(a.end ?? "9999-12") || b.start.localeCompare(a.start));
   const { body, html, ...profileFields } = profile;
-  const content: Content = { profile: { ...profileFields, body, html }, skills, roles, projects, stories, sampleFiles };
+  const content: Content = { profile: { ...profileFields, body, html }, skills, roles, projects, stories, places, sampleFiles };
   if (dir === DEFAULT_DIR) cached = content;
   return content;
 }

@@ -4,7 +4,7 @@ import { getContent } from "../lib/content";
 try {
   const c = getContent();
   console.log(
-    `content OK: ${c.roles.length} roles, ${c.projects.length} projects, ${c.stories.length} stories, ${c.skills.length} skills` +
+    `content OK: ${c.roles.length} roles, ${c.projects.length} projects, ${c.stories.length} stories, ${c.places.length} places, ${c.skills.length} skills` +
       (c.sampleFiles.length ? ` (${c.sampleFiles.length} files still sample)` : ""),
   );
 } catch (error) {

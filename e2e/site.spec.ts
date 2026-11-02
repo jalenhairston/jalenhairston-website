@@ -224,3 +224,35 @@ test.describe("site-wide (US7, US8, US9, NFRs)", () => {
     await expect(page.getByRole("link", { name: "Back home" })).toHaveAttribute("href", "/");
   });
 });
+
+test.describe("things-to-do map (POC)", () => {
+  test("selecting a pin opens a sheet with new-tab post links, no horizontal scroll at 375x812", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    // Stub the third-party basemap style so the test is deterministic and offline-safe.
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({
+        json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] },
+      }),
+    );
+    await page.goto("/map");
+    const sheet = page.getByRole("region", { name: "Borough Market" });
+    // Markers are created after the map module loads (and rebuilt on state changes), so retry the click.
+    await expect(async () => {
+      await page.locator('button[aria-label="Borough Market, London"]').click({ force: true, timeout: 1000 });
+      await expect(sheet).toBeVisible({ timeout: 1000 });
+    }).toPass({ timeout: 15_000 });
+    const tiktok = sheet.getByRole("link", { name: /TikTok/ });
+    await expect(tiktok).toHaveAttribute("target", "_blank");
+    await expect(tiktok).toHaveAttribute("rel", "noopener noreferrer");
+    expect(await hasHorizontalScroll(page)).toBe(false);
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+  });
+
+  test("menu links to the map", async ({ page }) => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Menu" }).click();
+    await page.getByRole("link", { name: "Map" }).click();
+    await expect(page).toHaveURL(/\/map$/);
+  });
+});
