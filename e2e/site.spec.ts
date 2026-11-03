@@ -235,21 +235,44 @@ test.describe("things-to-do map (POC)", () => {
       }),
     );
     await page.goto("/map");
-    const sheet = page.getByRole("region", { name: "BU Merch Store" });
-    // Markers are created after the map module loads (and rebuilt on state changes), so retry the click.
+    const sheet = page.getByRole("region", { name: "Neptune Oyster" });
+    // Wait for the map to be up (clusters drawn) before selecting.
+    await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+    // Select via the hidden list (flies the map in), then tap the now-separate pin itself.
+    await page.getByRole("button", { name: "Neptune Oyster, Boston (food)" }).dispatchEvent("click");
+    await expect(sheet).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
     await expect(async () => {
-      await page.locator('button[aria-label="BU Merch Store, Boston"]').click({ force: true, timeout: 1000 });
+      await page.locator('button[aria-label="Neptune Oyster, Boston"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
     // TikTok search is listed first and opens in a new tab.
-    const search = sheet.getByRole("link").first();
+    const search = sheet.getByRole("link", { name: /^TikTok/ }).first();
     await expect(search).toHaveText(/TikTok/);
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=BU%20Merch%20Store%20Boston");
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Neptune%20Oyster%20Boston");
     await expect(search).toHaveAttribute("target", "_blank");
     await expect(search).toHaveAttribute("rel", "noopener noreferrer");
     expect(await hasHorizontalScroll(page)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
+  });
+
+  test("dense areas show count clusters that zoom in to individual pins", async ({ page }) => {
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("/map");
+    const clusters = page.locator('button[aria-label$="places, zoom in"]');
+    await expect(clusters.first()).toBeVisible();
+    await expect(clusters.first()).toHaveText(/^\d+$/);
+    const pins = page.locator("button.map-pin");
+    // Tap a cluster until it has expanded into individual photo pins.
+    for (let i = 0; i < 8 && (await pins.count()) === 0; i++) {
+      await clusters.first().click({ force: true });
+      await page.waitForTimeout(700);
+    }
+    expect(await pins.count()).toBeGreaterThan(0);
   });
 
   test("expanded card shows more photos with credits, then Instagram last", async ({ page }) => {

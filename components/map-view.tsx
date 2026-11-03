@@ -4,6 +4,7 @@
 // Visitor-added places live in localStorage only (this device) and can be copied as content files.
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MapLibreMap, Marker } from "maplibre-gl";
+import Supercluster from "supercluster";
 import { useEffect, useRef, useState } from "react";
 
 export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string };
@@ -34,6 +35,8 @@ const CATEGORY_EMOJI: Record<string, string> = {
   shopping: "🛍️",
   other: "📍",
 };
+/** Pins cluster up to this zoom; selecting a place flies one level past it so it always shows alone. */
+const CLUSTER_MAX_ZOOM = 14;
 const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram" } as const;
 
 function platformOf(url: string): PostLink["platform"] | undefined {
@@ -85,6 +88,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [adding, setAdding] = useState(false);
   const [draftPoint, setDraftPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [copied, setCopied] = useState(false);
+  const [zoom, setZoom] = useState(0);
 
   const all = [...places, ...userPlaces];
   const selected = all.find((p) => p.id === selectedId) ?? null;
@@ -127,6 +131,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
         map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
+        setZoom(Math.floor(map.getZoom()));
+        map.on("zoomend", () => setZoom(Math.floor(map!.getZoom())));
         map.on("click", (e) => {
           if (!addModeRef.current) return;
           setDraftPoint({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -163,7 +169,40 @@ export function MapView({ places }: { places: MapPlace[] }) {
       const { Marker: MarkerCtor } = await import("maplibre-gl");
       if (cancelled) return;
       markersRef.current.forEach((m) => m.remove());
-      markersRef.current = all.map((p) => {
+      const byId = new Map(all.map((p) => [p.id, p]));
+      const index = new Supercluster<{ id: string }>({ radius: 56, maxZoom: CLUSTER_MAX_ZOOM });
+      index.load(
+        all.map((p) => ({
+          type: "Feature" as const,
+          properties: { id: p.id },
+          geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] },
+        })),
+      );
+      const items = index.getClusters([-180, -85, 180, 85], zoom);
+      markersRef.current = items.map((item) => {
+        const [lng, lat] = item.geometry.coordinates as [number, number];
+        const props = item.properties as { cluster?: boolean; cluster_id?: number; point_count?: number; id?: string };
+        if (props.cluster) {
+          const count = props.point_count ?? 0;
+          const el = document.createElement("button");
+          el.type = "button";
+          el.setAttribute("aria-label", `${count} places, zoom in`);
+          el.className =
+            "grid size-12 place-items-center rounded-full border-[3px] border-white bg-accent text-base font-bold text-accent-ink shadow-soft";
+          el.style.zIndex = "2";
+          el.textContent = String(count);
+          el.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (addModeRef.current) return;
+            map.easeTo({
+              center: [lng, lat],
+              zoom: Math.min(index.getClusterExpansionZoom(props.cluster_id as number), CLUSTER_MAX_ZOOM + 1),
+              duration: 500,
+            });
+          });
+          return new MarkerCtor({ element: el }).setLngLat([lng, lat]).addTo(map);
+        }
+        const p = byId.get(props.id as string)!;
         const el = document.createElement("button");
         el.type = "button";
         el.setAttribute("aria-label", `${p.name}, ${p.city}`);
@@ -196,14 +235,14 @@ export function MapView({ places }: { places: MapPlace[] }) {
           if (addModeRef.current) return;
           setSelectedId(p.id);
         });
-        return new MarkerCtor({ element: el }).setLngLat([p.lng, p.lat]).addTo(map);
+        return new MarkerCtor({ element: el }).setLngLat([lng, lat]).addTo(map);
       });
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mapReady, places, userPlaces, selectedId]);
+  }, [mapReady, places, userPlaces, selectedId, zoom]);
 
   // Fly to whichever place gets selected (pin tap or the hidden list).
   useEffect(() => {
@@ -212,7 +251,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
     if (!map || !mapReady || !p) return;
     // On phones the bottom sheet covers the lower half, so keep the pin in the visible top part.
     const bottom = window.innerWidth < 640 ? Math.round(map.getContainer().clientHeight * 0.55) : 0;
-    map.easeTo({ center: [p.lng, p.lat], zoom: Math.max(map.getZoom(), 14), duration: 600, padding: { bottom } });
+    map.easeTo({ center: [p.lng, p.lat], zoom: Math.max(map.getZoom(), CLUSTER_MAX_ZOOM + 1), duration: 600, padding: { bottom } });
     // Only re-run when the selection changes, not when the lists update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, mapReady]);
