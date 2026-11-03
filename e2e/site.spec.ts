@@ -377,22 +377,30 @@ test.describe("things-to-do map (POC)", () => {
       const sheet = page.getByRole("region", { name: name.split(",")[0] });
       await expect(sheet).toBeVisible();
       // Exactly one set of link sections for the current place, whatever was selected before.
-      await expect(sheet.locator("details")).toHaveCount(name.startsWith("Tony") ? 0 : 1);
+      const noTikTok = name.startsWith("Tony") || name.startsWith("Fenway");
+      await expect(sheet.locator("details")).toHaveCount(noTikTok ? 0 : 1);
       await expect(sheet.getByRole("link", { name: /^Instagram/ })).toHaveCount(1);
       await expect(sheet.getByRole("link", { name: /^Google/ })).toHaveCount(1);
-      await expect(page.locator('section[aria-label]').filter({ has: page.locator("summary") })).toHaveCount(name.startsWith("Tony") ? 0 : 1);
+      await expect(page.locator('section[aria-label]').filter({ has: page.locator("summary") })).toHaveCount(noTikTok ? 0 : 1);
     }
   });
 
-  test("places with no saved TikToks show a TikTok search link instead of a dropdown", async ({ page }) => {
+  test("places without an embeddable TikTok show no TikTok section or search link", async ({ page }) => {
     await page.goto("/map");
-    await page.getByRole("button", { name: /^Tony & Elaine's, Boston/ }).dispatchEvent("click");
-    const sheet = page.getByRole("region", { name: "Tony & Elaine's" });
-    await expect(sheet).toBeVisible();
-    await expect(sheet.locator("details")).toHaveCount(0);
-    const search = sheet.getByRole("link", { name: /^TikTok/ });
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Tony%20%26%20Elaine's%20Boston");
-    await expect(search).toHaveAttribute("target", "_blank");
+    // Tony & Elaine's has no saved TikToks; Fenway only has a hashtag page (not an embeddable video).
+    for (const [button, region] of [
+      ["Tony & Elaine's, Boston (food)", "Tony & Elaine's"],
+      ["Fenway, Boston (culture)", "Fenway"],
+    ] as const) {
+      await page.getByRole("button", { name: button, exact: true }).dispatchEvent("click");
+      const sheet = page.getByRole("region", { name: region });
+      await expect(sheet).toBeVisible();
+      await expect(sheet.locator("details")).toHaveCount(0);
+      await expect(sheet.getByRole("link", { name: /TikTok/ })).toHaveCount(0);
+      // The rest of the card is intact.
+      await expect(sheet.getByRole("link", { name: /^Instagram/ })).toHaveCount(1);
+      await expect(sheet.getByRole("link", { name: /^Google/ })).toHaveCount(1);
+    }
   });
 
   test("pins show a photo thumbnail and the place name before selecting", async ({ page }) => {
@@ -510,7 +518,7 @@ test.describe("things-to-do map (POC)", () => {
       const card = page.getByRole("region", { name: "Tatte Bakery & Cafe" });
       await expect(card).toBeVisible();
       await expect(card).toContainText("added by you");
-      await expect(card.getByRole("link", { name: /^TikTok/ })).toHaveAttribute("href", /tiktok\.com\/search\?q=Tatte/);
+      await expect(card.getByRole("link", { name: /TikTok/ })).toHaveCount(0); // no video saved, so no TikTok section
       await expect(card.getByRole("link", { name: /Open in Apple Maps/ })).toHaveAttribute("href", /ll=42\.3535,-71\.0745/);
 
       // Survives a refresh: it is reloaded from this device's storage.

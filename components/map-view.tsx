@@ -805,17 +805,9 @@ function TikTokSection({ place }: { place: MapPlace }) {
   const { saved, search } = tiktokLinks(place);
   const [playing, setPlaying] = useState<string | null>(null);
 
-  if (saved.length === 0) {
-    return (
-      <a href={search.url} target="_blank" rel="noopener noreferrer" className={`${rowLink} bg-accent font-semibold text-accent-ink`}>
-        <span>
-          TikTok<span className="font-normal opacity-80"> · {search.title}</span>
-        </span>
-        <span aria-hidden>↗</span>
-        <span className="sr-only">(opens in a new tab)</span>
-      </a>
-    );
-  }
+  // No embeddable TikTok video for this place: show no TikTok section at all (no search link either).
+  const videos = saved.filter((l) => embedFor(l));
+  if (videos.length === 0) return null;
   return (
     <details
       className="group rounded-[1.375rem] bg-accent text-accent-ink"
@@ -828,7 +820,7 @@ function TikTokSection({ place }: { place: MapPlace }) {
           TikTok
           <span className="font-normal opacity-80">
             {" "}
-            · {saved.length} {saved.length === 1 ? "link" : "links"}
+            · {videos.length} {videos.length === 1 ? "video" : "videos"}
           </span>
         </span>
         <span aria-hidden className="transition-transform group-open:rotate-180">
