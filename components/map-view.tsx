@@ -56,6 +56,9 @@ const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${enco
 const instagramTag = (p: MapPlace) => p.name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, "");
 const instagramSearchUrl = (p: MapPlace) => `https://www.instagram.com/explore/tags/${instagramTag(p)}/`;
 
+/** Apple Maps: opens the Maps app on iPhone/iPad/Mac, and Apple Maps on the web elsewhere. */
+const appleMapsUrl = (p: MapPlace) => `https://maps.apple.com/?ll=${p.lat},${p.lng}&q=${encodeURIComponent(p.name)}`;
+
 const googleSearchUrl = (p: MapPlace) => `https://www.google.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
 
 /** Saved TikToks for the dropdown, with a TikTok search as the last row (and the only one if none are saved). */
@@ -605,6 +608,17 @@ export function MapView({ places }: { places: MapPlace[] }) {
               ×
             </button>
           </div>
+          <a
+            href={appleMapsUrl(selected)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
+          >
+            <span aria-hidden>📍</span>
+            Open in Apple Maps
+            <span aria-hidden>↗</span>
+            <span className="sr-only">(opens in a new tab)</span>
+          </a>
           {selected.photos.length > 0 && (
             <ul aria-label="Photos" className="-mx-5 mt-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-5 pb-1">
               {selected.photos.map((ph) => (

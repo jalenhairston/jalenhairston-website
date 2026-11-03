@@ -248,6 +248,12 @@ test.describe("things-to-do map (POC)", () => {
       await page.locator('button[aria-label="Neptune Oyster, Boston"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
+    // "Open in Apple Maps" sits at the top of the card and points at the place's coordinates.
+    const maps = sheet.getByRole("link", { name: /Open in Apple Maps/ });
+    await expect(maps).toHaveAttribute("href", "https://maps.apple.com/?ll=42.36324,-71.056&q=Neptune%20Oyster");
+    await expect(maps).toHaveAttribute("target", "_blank");
+    await expect(maps).toHaveAttribute("rel", "noopener noreferrer");
+    expect(await maps.evaluate((el, card) => el.compareDocumentPosition(card.querySelector("details")!) & Node.DOCUMENT_POSITION_FOLLOWING, await sheet.elementHandle())).toBeTruthy();
     // TikTok is a collapsed dropdown of real videos; the links are hidden until it is opened.
     const dropdown = sheet.locator("details");
     await expect(dropdown).not.toHaveAttribute("open", "");
