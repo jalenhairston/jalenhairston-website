@@ -181,7 +181,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
       if (cancelled) return;
       markersRef.current.forEach((m) => m.remove());
       const byId = new Map(all.map((p) => [p.id, p]));
-      const index = new Supercluster<{ id: string }>({ radius: 56, maxZoom: CLUSTER_MAX_ZOOM });
+      const index = new Supercluster<{ id: string }>({ radius: 45, maxZoom: CLUSTER_MAX_ZOOM });
       index.load(
         all.map((p) => ({
           type: "Feature" as const,
