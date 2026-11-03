@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { categoryFor, distanceMeters, findExisting, parseNominatim, parsePhoton, searchPlaces } from "./geocode";
+import { categoryFor, distanceMeters, findExisting, mergeResults, parseGooglePlaces, parseNominatim, parsePhoton, searchPlaces } from "./geocode";
 
 const photon = {
   features: [
@@ -83,5 +83,89 @@ describe("searchPlaces", () => {
     expect(r[0]).toMatchObject({ name: "Fallback Cafe", category: "coffee" });
     const dead = vi.fn(async () => ({ ok: false, status: 500 }) as Response);
     await expect(searchPlaces("nothing works", { lat: 20, lng: 20 }, { fetchImpl: dead as unknown as typeof fetch })).rejects.toThrow();
+  });
+});
+
+describe("mergeResults", () => {
+  const r = (id: string, name: string, lat: number, lng: number) => ({ id, name, detail: "", city: "", category: "food", lat, lng });
+  it("drops the same spot and the same name nearby, keeping the first", () => {
+    const merged = mergeResults(
+      [r("a", "Tatte Bakery", 42.35, -71.08)],
+      [r("b", "Tatte Bakery", 42.3505, -71.0805), r("c", "Tatte Bakery", 42.35004, -71.08), r("d", "Other Cafe", 42.36, -71.09)],
+    );
+    expect(merged.map((m) => m.id)).toEqual(["a", "d"]);
+  });
+  it("keeps same-named places that are far apart", () => {
+    expect(mergeResults([r("a", "Starbucks", 42.35, -71.08)], [r("b", "Starbucks", 42.4, -71.2)])).toHaveLength(2);
+  });
+});
+
+describe("parseGooglePlaces", () => {
+  it("reads the Places API (New) shape", () => {
+    const [x] = parseGooglePlaces({
+      places: [
+        {
+          id: "ChIJabc",
+          displayName: { text: "Lola 42" },
+          formattedAddress: "22 Liberty Dr, Boston, MA 02210, USA",
+          location: { latitude: 42.3546, longitude: -71.0453 },
+          types: ["bar", "restaurant", "point_of_interest"],
+          addressComponents: [{ longText: "Boston", types: ["locality", "political"] }],
+        },
+        { displayName: { text: "No location" } },
+      ],
+    });
+    expect(x).toMatchObject({ id: "google:ChIJabc", name: "Lola 42", city: "Boston", category: "drinks", lat: 42.3546, lng: -71.0453 });
+    expect(x.detail).toBe("22 Liberty Dr, Boston, MA 02210");
+  });
+});
+
+describe("searchPlaces strategy", () => {
+  const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as Response;
+  const feat = (name: string, lng: number, lat: number) => ({ geometry: { coordinates: [lng, lat] }, properties: { name, osm_key: "amenity", osm_value: "cafe", city: "Boston" } });
+
+  it("limits Photon to the map's region and also tries the query with the city, merging both", async () => {
+    const calls: string[] = [];
+    const f = vi.fn<(u: URL | string) => Promise<Response>>(async (u) => {
+      calls.push(String(u));
+      return ok({ features: String(u).includes("Boston") ? [feat("Zaku Izakaya", -71.0798, 42.3419)] : [feat("Zaku Sushi", -71.2, 42.5)] });
+    });
+    const r = await searchPlaces("zaku", { lat: 42.355, lng: -71.07, city: "Boston" }, { fetchImpl: f as unknown as typeof fetch });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((c) => c.includes("bbox="))).toBe(true);
+    expect(calls.some((c) => c.includes("q=zaku+Boston"))).toBe(true);
+    expect(r.map((x) => x.name).sort()).toEqual(["Zaku Izakaya", "Zaku Sushi"]);
+  });
+
+  it("retries without bounds when the region has no match", async () => {
+    const calls: string[] = [];
+    const f = vi.fn<(u: URL | string) => Promise<Response>>(async (u) => {
+      calls.push(String(u));
+      return ok({ features: String(u).includes("bbox=") ? [] : [feat("Far Away Cafe", 10, 50)] });
+    });
+    const r = await searchPlaces("far away", { lat: 1, lng: 1 }, { fetchImpl: f as unknown as typeof fetch });
+    expect(r[0].name).toBe("Far Away Cafe");
+    expect(calls).toHaveLength(2);
+    expect(calls[1]).not.toContain("bbox=");
+  });
+
+  it("uses Google first when a key is configured, and falls back to OpenStreetMap if Google fails", async () => {
+    const google = vi.fn<(u: URL | string, init?: RequestInit) => Promise<Response>>(async (u, init) => {
+      if (String(u).includes("googleapis")) {
+        expect(init?.method).toBe("POST");
+        expect((init?.headers as Record<string, string>)["x-goog-api-key"]).toBe("KEY");
+        expect(JSON.parse(String(init?.body)).textQuery).toBe("tony and elaines");
+        return ok({ places: [{ id: "1", displayName: { text: "Tony & Elaine's" }, location: { latitude: 42.3656, longitude: -71.0581 }, types: ["restaurant"] }] });
+      }
+      return ok({ features: [feat("OSM Result", -71, 42)] });
+    });
+    const g = await searchPlaces("tony and elaines", { lat: 42.36, lng: -71.06 }, { fetchImpl: google as unknown as typeof fetch, googleKey: "KEY" });
+    expect(g[0]).toMatchObject({ name: "Tony & Elaine's", category: "food" });
+
+    const broken = vi.fn<(u: URL | string) => Promise<Response>>(async (u) =>
+      String(u).includes("googleapis") ? ({ ok: false, status: 403 } as Response) : ok({ features: [feat("OSM Result", -71, 42)] }),
+    );
+    const fb = await searchPlaces("some place xyz", { lat: 42.36, lng: -71.06 }, { fetchImpl: broken as unknown as typeof fetch, googleKey: "BAD" });
+    expect(fb[0].name).toBe("OSM Result");
   });
 });

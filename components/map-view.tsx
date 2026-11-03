@@ -204,7 +204,26 @@ export function MapView({ places }: { places: MapPlace[] }) {
           center: [-30, 30],
           zoom: 1.4,
           attributionControl: { compact: true },
+          // Strictly flat map: no tilt, no rotation. A tilted map makes pins look like they slide across
+          // the (3D) buildings as you zoom and puts a tapped rooftop on the wrong ground spot, and without
+          // a compass there is no way back to north-up.
+          pitch: 0,
+          maxPitch: 0,
+          bearing: 0,
+          dragRotate: false,
+          touchPitch: false,
+          pitchWithRotate: false,
         });
+        map.touchZoomRotate.disableRotation(); // pinch still zooms, two fingers no longer rotate
+        map.keyboard.disableRotation();
+        // The basemap draws 3D buildings from zoom 14. Flatten them so footprints stay put under the pins.
+        const flattenBuildings = () => {
+          if (!map?.getLayer("building-3d")) return;
+          map.setPaintProperty("building-3d", "fill-extrusion-height", 0);
+          map.setPaintProperty("building-3d", "fill-extrusion-base", 0);
+        };
+        map.on("style.load", flattenBuildings);
+        flattenBuildings();
         if (places.length > 0) {
           // Start on the city with the most places; the rest of the world is a zoom-out away.
           const counts = new Map<string, number>();
@@ -228,6 +247,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
           console.warn("map error", e.error);
         });
         mapRef.current = map;
+        // Debug/test hook: `/map?debug-map` exposes the map instance as window.__map.
+        if (new URLSearchParams(window.location.search).has("debug-map")) (window as unknown as { __map?: MapLibreMap }).__map = map;
         setMapReady(true);
       } catch {
         setMapError(true);
@@ -597,7 +618,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
         <PlaceSearch
           getNear={() => {
             const c = mapRef.current?.getCenter();
-            return c ? { lat: c.lat, lng: c.lng } : { lat: 42.36, lng: -71.06 };
+            const near = c ? { lat: c.lat, lng: c.lng } : { lat: 42.36, lng: -71.06 };
+            return { ...near, city: nearestCity(near, all) || undefined };
           }}
           places={all}
           onPick={(r) => {
@@ -955,7 +977,7 @@ function PlaceSearch({
   onPick,
   onPickExisting,
 }: {
-  getNear: () => { lat: number; lng: number };
+  getNear: () => { lat: number; lng: number; city?: string };
   places: MapPlace[];
   onPick: (r: PlaceResult) => void;
   onPickExisting: (p: MapPlace) => void;
@@ -978,7 +1000,7 @@ function PlaceSearch({
     const ctrl = new AbortController();
     const t = setTimeout(async () => {
       try {
-        setResults(await searchPlaces(term, getNear(), { signal: ctrl.signal }));
+        setResults(await searchPlaces(term, getNear(), { signal: ctrl.signal, googleKey: process.env.NEXT_PUBLIC_GOOGLE_PLACES_KEY || undefined }));
         setStatus("done");
       } catch (e) {
         if ((e as Error).name !== "AbortError") setStatus("error");
