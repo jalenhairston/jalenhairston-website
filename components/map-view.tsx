@@ -612,7 +612,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
             href={appleMapsUrl(selected)}
             target="_blank"
             rel="noopener noreferrer"
-            className="mt-3 inline-flex min-h-11 items-center gap-2 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
+            className="mt-2 inline-flex min-h-8 items-center gap-1.5 rounded-pill bg-tag px-3 py-1 text-sm"
           >
             <span aria-hidden>📍</span>
             Open in Apple Maps
