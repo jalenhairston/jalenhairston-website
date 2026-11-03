@@ -199,7 +199,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
           el.type = "button";
           el.setAttribute("aria-label", `${count} places, zoom in`);
           el.className =
-            "grid size-12 place-items-center rounded-full border-[3px] border-white bg-accent text-base font-bold text-accent-ink shadow-soft";
+            "grid size-11 place-items-center rounded-full border-[3px] border-white bg-accent text-sm font-bold text-accent-ink shadow-soft";
           el.style.zIndex = "2";
           el.textContent = String(count);
           el.addEventListener("click", (ev) => {
@@ -232,14 +232,14 @@ export function MapView({ places }: { places: MapPlace[] }) {
           img.className = "size-full object-cover";
           tile.append(img);
         } else {
-          tile.classList.add("grid", "place-items-center", "text-2xl");
+          tile.classList.add("grid", "place-items-center", "text-xl");
           tile.textContent = CATEGORY_EMOJI[p.category] ?? CATEGORY_EMOJI.other;
         }
         const label = document.createElement("span");
         label.setAttribute("aria-hidden", "true");
         label.textContent = p.name;
         label.className =
-          "map-pin-label pointer-events-none absolute top-full left-1/2 mt-1 max-w-32 -translate-x-1/2 truncate rounded-pill bg-white/90 px-2 py-0.5 text-[11px] leading-tight font-semibold text-ink shadow-soft";
+          "map-pin-label pointer-events-none absolute top-full left-1/2 mt-1 max-w-28 -translate-x-1/2 truncate rounded-pill bg-white/90 px-1.5 py-0.5 text-[10px] leading-tight font-semibold text-ink shadow-soft";
         el.append(tile, label);
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
