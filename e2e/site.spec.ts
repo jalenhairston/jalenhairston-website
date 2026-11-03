@@ -262,7 +262,7 @@ test.describe("things-to-do map (POC)", () => {
     );
     await page.goto("/map");
     const pin = page.locator('button[aria-label="Borough Market, London"]');
-    await expect(pin.locator("img")).toHaveAttribute("src", /borough-market-1\.svg$/);
+    await expect(pin.locator("img")).toHaveAttribute("src", /Borough_Market_I\.jpg/);
     await expect(pin).toContainText("Borough Market");
   });
 

@@ -6,9 +6,9 @@ category: food
 lat: 51.5055
 lng: -0.0910
 photos:
-  - { src: "/places/sample-borough-market-1.svg", alt: "Borough Market: Stalls (placeholder)" }
-  - { src: "/places/sample-borough-market-2.svg", alt: "Borough Market: Street food (placeholder)" }
-  - { src: "/places/sample-borough-market-3.svg", alt: "Borough Market: Market hall (placeholder)" }
+  - { src: "https://thumb.wikimedia.org/wikipedia/commons/thumb/0/03/London_-_Borough_Market_I.jpg/960px-London_-_Borough_Market_I.jpg", alt: "Borough Market", credit: "CC BY-SA 4.0 via Wikimedia Commons", creditUrl: "https://commons.wikimedia.org/wiki/File:London_-_Borough_Market_I.jpg" }
+  - { src: "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/4b/London_-_Borough_Market_II.jpg/960px-London_-_Borough_Market_II.jpg", alt: "Borough Market", credit: "CC BY-SA 4.0 via Wikimedia Commons", creditUrl: "https://commons.wikimedia.org/wiki/File:London_-_Borough_Market_II.jpg" }
+  - { src: "https://thumb.wikimedia.org/wikipedia/commons/thumb/4/44/London_-_Borough_Market_III.jpg/960px-London_-_Borough_Market_III.jpg", alt: "Borough Market", credit: "CC BY-SA 4.0 via Wikimedia Commons", creditUrl: "https://commons.wikimedia.org/wiki/File:London_-_Borough_Market_III.jpg" }
 links:
   - { platform: tiktok, url: "https://www.tiktok.com/search?q=borough%20market", title: "What to eat" }
   - { platform: instagram, url: "https://www.instagram.com/explore/tags/boroughmarket/" }

@@ -7,7 +7,7 @@ import type { Map as MapLibreMap, Marker } from "maplibre-gl";
 import { useEffect, useRef, useState } from "react";
 
 export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string };
-export type Photo = { src: string; alt: string };
+export type Photo = { src: string; alt: string; credit?: string; creditUrl?: string };
 export type MapPlace = {
   id: string;
   name: string;
@@ -107,9 +107,13 @@ export function MapView({ places }: { places: MapPlace[] }) {
           attributionControl: { compact: true },
         });
         if (places.length > 0) {
+          // Start on the city with the most places; the rest of the world is a zoom-out away.
+          const counts = new Map<string, number>();
+          places.forEach((p) => counts.set(p.city, (counts.get(p.city) ?? 0) + 1));
+          const home = [...counts.entries()].sort((x, y) => y[1] - x[1])[0][0];
           const bounds = new maplibre.LngLatBounds();
-          places.forEach((p) => bounds.extend([p.lng, p.lat]));
-          map.fitBounds(bounds, { padding: { top: 90, bottom: 90, left: 110, right: 110 }, maxZoom: 10, duration: 0 });
+          places.filter((p) => p.city === home).forEach((p) => bounds.extend([p.lng, p.lat]));
+          map.fitBounds(bounds, { padding: { top: 100, bottom: 100, left: 70, right: 70 }, maxZoom: 13, duration: 0 });
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
         map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
@@ -304,6 +308,17 @@ export function MapView({ places }: { places: MapPlace[] }) {
                 <li key={ph.src} className="shrink-0 snap-start">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={ph.src} alt={ph.alt} loading="lazy" className="h-32 w-44 rounded-2xl bg-tag object-cover" />
+                  {ph.credit && (
+                    <p className="mt-1 max-w-44 truncate text-[11px] text-muted">
+                      {ph.creditUrl ? (
+                        <a href={ph.creditUrl} target="_blank" rel="noopener noreferrer" className="underline">
+                          {ph.credit}
+                        </a>
+                      ) : (
+                        ph.credit
+                      )}
+                    </p>
+                  )}
                 </li>
               ))}
             </ul>
