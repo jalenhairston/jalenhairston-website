@@ -321,7 +321,7 @@ test.describe("things-to-do map (POC)", () => {
     expect((await shell.boundingBox())!.height).toBeLessThan(812);
   });
 
-  test("locate button shows the user's position on the map", async ({ browser }) => {
+  test("the user's position is shown by default and the locate button just centers on it", async ({ browser }) => {
     const context = await browser.newContext({
       viewport: { width: 375, height: 812 },
       permissions: ["geolocation"],
@@ -332,21 +332,34 @@ test.describe("things-to-do map (POC)", () => {
       route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
     );
     await page.goto("http://localhost:3100/map");
-    await expect(page.locator(".maplibregl-user-location-dot")).toHaveCount(0);
-    await page.getByRole("button", { name: "Find my location" }).click();
-    await expect(page.locator(".maplibregl-user-location-dot")).toBeVisible();
+    // No tap needed: the dot appears on its own.
+    const dot = page.getByTestId("user-location");
+    await expect(dot).toBeAttached();
+    // Move the map away, then centre on the user.
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await page.getByRole("button", { name: "Zoom out" }).click();
+    await page.waitForTimeout(600);
+    await page.getByRole("button", { name: "Center on my location" }).click();
+    await expect(dot).toBeVisible();
+    await expect(async () => {
+      const box = await dot.boundingBox();
+      const shell = (await page.getByTestId("map-shell").boundingBox())!;
+      // Centered horizontally in the map once the fly-to ends.
+      expect(Math.abs(box!.x + box!.width / 2 - (shell.x + shell.width / 2))).toBeLessThan(6);
+    }).toPass({ timeout: 5000 });
+    await expect(page.getByText(/Location is blocked/)).toHaveCount(0);
     await context.close();
   });
 
-  test("a denied location permission explains how to fix it", async ({ browser }) => {
+  test("a declined location permission is explained automatically", async ({ browser }) => {
     const context = await browser.newContext({ viewport: { width: 375, height: 812 } }); // no geolocation permission
     const page = await context.newPage();
     await page.route("https://tiles.openfreemap.org/**", (route) =>
       route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
     );
     await page.goto("http://localhost:3100/map");
-    await page.getByRole("button", { name: "Find my location" }).click();
     await expect(page.getByText(/Location is blocked|Couldn't find your location/)).toBeVisible();
+    await expect(page.getByTestId("user-location")).toHaveCount(0);
     await context.close();
   });
 

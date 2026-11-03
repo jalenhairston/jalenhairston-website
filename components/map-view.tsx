@@ -100,6 +100,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [zoom, setZoom] = useState(0);
   const [full, setFull] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
+  const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
+  const userMarkerRef = useRef<Marker | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
 
   const all = [...places, ...userPlaces];
@@ -142,23 +144,6 @@ export function MapView({ places }: { places: MapPlace[] }) {
           map.fitBounds(bounds, { padding: { top: 100, bottom: 100, left: 70, right: 70 }, maxZoom: 13, duration: 0 });
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
-        // Tapping the locate button asks for permission (never on page load), shows a blue dot with an
-        // accuracy ring, and follows the user until they drag the map.
-        const geolocate = new maplibre.GeolocateControl({
-          positionOptions: { enableHighAccuracy: true, timeout: 15_000 },
-          trackUserLocation: true,
-          showAccuracyCircle: true,
-          fitBoundsOptions: { maxZoom: 15 },
-        });
-        geolocate.on("geolocate", () => setGeoError(null));
-        geolocate.on("error", (e) =>
-          setGeoError(
-            e.code === 1
-              ? "Location is blocked. Allow it for this site in your browser settings to see where you are."
-              : "Couldn't find your location. Try again outdoors or with location services on.",
-          ),
-        );
-        map.addControl(geolocate, "top-right");
         setZoom(Math.floor(map.getZoom()));
         map.on("zoomend", () => setZoom(Math.floor(map!.getZoom())));
         map.on("click", (e) => {
@@ -283,6 +268,89 @@ export function MapView({ places }: { places: MapPlace[] }) {
     // Only re-run when the selection changes, not when the lists update.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, mapReady]);
+
+  // Location is on by default: watch the position and keep a blue dot on the map. (The browser still
+  // asks permission once; if it is declined we say so and carry on without a dot.)
+  useEffect(() => {
+    if (!mapReady || !("geolocation" in navigator)) return;
+    const id = navigator.geolocation.watchPosition(
+      (pos) => {
+        setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGeoError(null);
+      },
+      (err) =>
+        setGeoError(
+          err.code === 1
+            ? "Location is blocked. Allow it for this site in your browser settings to see where you are."
+            : "Couldn't find your location. Try again outdoors or with location services on.",
+        ),
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 20_000 },
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, [mapReady]);
+
+  // Draw / move the user's dot.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !userPos) return;
+    let cancelled = false;
+    (async () => {
+      if (userMarkerRef.current) {
+        userMarkerRef.current.setLngLat([userPos.lng, userPos.lat]);
+        return;
+      }
+      const { Marker: MarkerCtor } = await import("maplibre-gl");
+      if (cancelled || userMarkerRef.current) return;
+      const el = document.createElement("div");
+      el.dataset.testid = "user-location";
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", "Your location");
+      el.className = "size-4 rounded-full border-2 border-white bg-blue-600 shadow-soft";
+      el.style.boxShadow = "0 0 0 7px rgb(37 99 235 / 0.25)";
+      el.style.pointerEvents = "none";
+      el.style.zIndex = "5";
+      userMarkerRef.current = new MarkerCtor({ element: el }).setLngLat([userPos.lng, userPos.lat]).addTo(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mapReady, userPos]);
+
+  useEffect(
+    () => () => {
+      userMarkerRef.current?.remove();
+      userMarkerRef.current = null;
+    },
+    [],
+  );
+
+  // Location notices fade on their own so they never sit over the map for long.
+  useEffect(() => {
+    if (!geoError) return;
+    const t = setTimeout(() => setGeoError(null), 9000);
+    return () => clearTimeout(t);
+  }, [geoError]);
+
+  function centerOnMe() {
+    const map = mapRef.current;
+    if (!map) return;
+    if (userPos) {
+      setGeoError(null);
+      map.easeTo({ center: [userPos.lng, userPos.lat], zoom: Math.max(map.getZoom(), 15), duration: 600 });
+      return;
+    }
+    // No fix yet (still waiting, or permission was declined): ask once more so the prompt can reappear.
+    navigator.geolocation?.getCurrentPosition(
+      (pos) => {
+        setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGeoError(null);
+        map.easeTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: Math.max(map.getZoom(), 15), duration: 600 });
+      },
+      () =>
+        setGeoError("Location is blocked or unavailable. Allow it for this site in your browser settings to see where you are."),
+      { enableHighAccuracy: true, timeout: 15_000 },
+    );
+  }
 
   // Escape closes the card / cancels add mode; with nothing open it leaves full screen.
   useEffect(() => {
@@ -416,6 +484,14 @@ export function MapView({ places }: { places: MapPlace[] }) {
           className="grid min-h-11 min-w-11 place-items-center rounded-pill bg-surface px-3 text-base font-semibold shadow-soft"
         >
           <span aria-hidden>{full ? "✕" : "⛶"}</span>
+        </button>
+        <button
+          type="button"
+          onClick={centerOnMe}
+          aria-label="Center on my location"
+          className="grid min-h-11 min-w-11 place-items-center rounded-pill bg-surface px-3 text-base font-semibold shadow-soft"
+        >
+          <span aria-hidden>◎</span>
         </button>
       </div>
 
