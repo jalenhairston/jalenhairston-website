@@ -99,6 +99,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [full, setFull] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
   const shellRef = useRef<HTMLDivElement>(null);
 
   const all = [...places, ...userPlaces];
@@ -141,7 +142,23 @@ export function MapView({ places }: { places: MapPlace[] }) {
           map.fitBounds(bounds, { padding: { top: 100, bottom: 100, left: 70, right: 70 }, maxZoom: 13, duration: 0 });
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
-        map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
+        // Tapping the locate button asks for permission (never on page load), shows a blue dot with an
+        // accuracy ring, and follows the user until they drag the map.
+        const geolocate = new maplibre.GeolocateControl({
+          positionOptions: { enableHighAccuracy: true, timeout: 15_000 },
+          trackUserLocation: true,
+          showAccuracyCircle: true,
+          fitBoundsOptions: { maxZoom: 15 },
+        });
+        geolocate.on("geolocate", () => setGeoError(null));
+        geolocate.on("error", (e) =>
+          setGeoError(
+            e.code === 1
+              ? "Location is blocked. Allow it for this site in your browser settings to see where you are."
+              : "Couldn't find your location. Try again outdoors or with location services on.",
+          ),
+        );
+        map.addControl(geolocate, "top-right");
         setZoom(Math.floor(map.getZoom()));
         map.on("zoomend", () => setZoom(Math.floor(map!.getZoom())));
         map.on("click", (e) => {
@@ -351,6 +368,15 @@ export function MapView({ places }: { places: MapPlace[] }) {
       <div className={`absolute inset-0 ${adding ? "cursor-crosshair" : ""}`}>
         <div ref={containerRef} className="h-full w-full" />
       </div>
+
+      {geoError && !adding && (
+        <p
+          role="alert"
+          className="absolute top-16 left-3 z-10 max-w-[calc(100%-5.5rem)] rounded-card bg-surface px-4 py-2 text-sm shadow-soft"
+        >
+          {geoError}
+        </p>
+      )}
 
       {mapError && (
         <p role="alert" className="absolute inset-x-4 top-4 z-10 rounded-card bg-surface p-4 text-sm shadow-soft">

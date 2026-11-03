@@ -321,6 +321,35 @@ test.describe("things-to-do map (POC)", () => {
     expect((await shell.boundingBox())!.height).toBeLessThan(812);
   });
 
+  test("locate button shows the user's position on the map", async ({ browser }) => {
+    const context = await browser.newContext({
+      viewport: { width: 375, height: 812 },
+      permissions: ["geolocation"],
+      geolocation: { latitude: 42.3555, longitude: -71.0603 },
+    });
+    const page = await context.newPage();
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("http://localhost:3100/map");
+    await expect(page.locator(".maplibregl-user-location-dot")).toHaveCount(0);
+    await page.getByRole("button", { name: "Find my location" }).click();
+    await expect(page.locator(".maplibregl-user-location-dot")).toBeVisible();
+    await context.close();
+  });
+
+  test("a denied location permission explains how to fix it", async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } }); // no geolocation permission
+    const page = await context.newPage();
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("http://localhost:3100/map");
+    await page.getByRole("button", { name: "Find my location" }).click();
+    await expect(page.getByText(/Location is blocked|Couldn't find your location/)).toBeVisible();
+    await context.close();
+  });
+
   test("menu links to the map", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Menu" }).click();
