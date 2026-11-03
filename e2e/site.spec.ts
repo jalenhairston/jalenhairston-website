@@ -226,7 +226,7 @@ test.describe("site-wide (US7, US8, US9, NFRs)", () => {
 });
 
 test.describe("things-to-do map (POC)", () => {
-  test("selecting a pin opens a sheet with new-tab post links, no horizontal scroll at 375x812", async ({ page }) => {
+  test("selecting a pin opens a sheet with TikTok-first, new-tab links, no horizontal scroll at 375x812", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     // Stub the third-party basemap style so the test is deterministic and offline-safe.
     await page.route("https://tiles.openfreemap.org/**", (route) =>
@@ -235,25 +235,32 @@ test.describe("things-to-do map (POC)", () => {
       }),
     );
     await page.goto("/map");
-    const sheet = page.getByRole("region", { name: "Ponce City Market" });
+    const sheet = page.getByRole("region", { name: "Museum of Fine Arts" });
     // Markers are created after the map module loads (and rebuilt on state changes), so retry the click.
     await expect(async () => {
-      await page.locator('button[aria-label="Ponce City Market, Atlanta"]').click({ force: true, timeout: 1000 });
+      await page.locator('button[aria-label="Museum of Fine Arts, Boston"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
     // TikTok search is listed first and opens in a new tab.
-    const links = sheet.getByRole("list").last().getByRole("link");
-    const search = links.first();
+    const search = sheet.getByRole("link").first();
     await expect(search).toHaveText(/TikTok/);
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Ponce%20City%20Market%20Atlanta");
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Museum%20of%20Fine%20Arts%20Boston");
     await expect(search).toHaveAttribute("target", "_blank");
     await expect(search).toHaveAttribute("rel", "noopener noreferrer");
-    await expect(links.last()).toHaveText(/Instagram/);
-    // Expanded card shows more photos.
-    await expect(sheet.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(3);
     expect(await hasHorizontalScroll(page)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
+  });
+
+  test("expanded card shows more photos with credits, then Instagram last", async ({ page }) => {
+    await page.goto("/map");
+    // The hidden place list selects a place without needing its pin on screen.
+    await page.getByRole("button", { name: /^Ponce City Market, Atlanta/ }).dispatchEvent("click");
+    const sheet = page.getByRole("region", { name: "Ponce City Market" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(3);
+    await expect(sheet.getByRole("link", { name: /Wikimedia Commons/ }).first()).toHaveAttribute("target", "_blank");
+    await expect(sheet.getByRole("link").last()).toHaveText(/Instagram/);
   });
 
   test("pins show a photo thumbnail and the place name before selecting", async ({ page }) => {

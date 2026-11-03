@@ -71,3 +71,20 @@ main {
     box-shadow: none;
   }
 }
+
+/* Map pins: full-size photo tile + name when zoomed in, compact tile when zoomed out. */
+.map-pin {
+  width: 3.5rem;
+  height: 3.5rem;
+}
+.map-pin[data-compact="true"] {
+  width: 2.25rem;
+  height: 2.25rem;
+}
+.map-pin[data-compact="true"] .map-pin-label {
+  display: none;
+}
+.map-pin[data-compact="true"] span:first-child {
+  font-size: 1rem;
+  border-width: 2px;
+}

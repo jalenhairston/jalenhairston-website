@@ -91,13 +91,13 @@ const placeSchema = z.object({
   name: z.string().min(1),
   city: z.string().min(1),
   category: z.enum(placeCategories),
-  // Paths under /public (e.g. "/places/x.jpg") or https URLs. The first photo is the map thumbnail.
-  photos: z.array(z.object({ src: z.union([publicPath, z.url()]), alt: z.string().min(1), credit: z.string().optional(), creditUrl: z.url().optional() })).min(1, "add at least one photo"),
+  // Optional. Paths under /public (e.g. "/places/x.jpg") or https URLs. The first photo is the map thumbnail.
+  photos: z.array(z.object({ src: z.union([publicPath, z.url()]), alt: z.string().min(1), credit: z.string().optional(), creditUrl: z.url().optional() })).default([]),
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
   links: z
     .array(z.object({ platform: z.enum(postPlatforms), url: z.url(), title: z.string().optional() }))
-    .min(1, "add at least one post link"),
+    .default([]),
 });
 
 /** Raw markdown is kept for the knowledge base; html is pre-rendered for pages. */

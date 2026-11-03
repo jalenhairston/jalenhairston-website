@@ -24,6 +24,18 @@ export type MapPlace = {
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
 const STORAGE_KEY = "map-user-places-v1";
 const CATEGORIES = ["food", "drinks", "coffee", "outdoors", "culture", "nightlife", "shopping", "other"] as const;
+const CATEGORY_EMOJI: Record<string, string> = {
+  food: "🍽️",
+  drinks: "🍸",
+  coffee: "☕",
+  outdoors: "🌳",
+  culture: "🏛️",
+  nightlife: "🌙",
+  shopping: "🛍️",
+  other: "📍",
+};
+/** Below this zoom, pins shrink and hide their name so dense areas stay readable. */
+const FULL_PIN_ZOOM = 14;
 const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram" } as const;
 
 function platformOf(url: string): PostLink["platform"] | undefined {
@@ -117,6 +129,14 @@ export function MapView({ places }: { places: MapPlace[] }) {
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
         map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
+        map.on("zoom", () => {
+          const compact = map!.getZoom() < FULL_PIN_ZOOM;
+          markersRef.current.forEach((m) => {
+            const el = m.getElement();
+            // The selected pin stays full size.
+            el.dataset.compact = String(compact && el.style.zIndex !== "10");
+          });
+        });
         map.on("click", (e) => {
           if (!addModeRef.current) return;
           setDraftPoint({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -158,10 +178,11 @@ export function MapView({ places }: { places: MapPlace[] }) {
         el.type = "button";
         el.setAttribute("aria-label", `${p.name}, ${p.city}`);
         const active = p.id === selectedId;
-        el.className = `group relative block size-14 rounded-2xl transition-transform ${active ? "scale-110" : ""}`;
+        el.className = `map-pin group relative block rounded-2xl transition-transform ${active ? "scale-110" : ""}`;
+        el.dataset.compact = String(!active && map.getZoom() < FULL_PIN_ZOOM);
         el.style.zIndex = active ? "10" : "1";
         const tile = document.createElement("span");
-        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] bg-surface shadow-soft ${p.userAdded ? "border-amber-500" : "border-white"}`;
+        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] shadow-soft ${p.userAdded ? "border-amber-500" : "border-white"} ${p.photos[0] ? "bg-surface" : "bg-tag"}`;
         const thumb = p.photos[0];
         if (thumb) {
           const img = document.createElement("img");
@@ -172,22 +193,19 @@ export function MapView({ places }: { places: MapPlace[] }) {
           img.className = "size-full object-cover";
           tile.append(img);
         } else {
-          tile.classList.add("grid", "place-items-center", "bg-accent", "text-accent-ink", "text-lg", "font-bold");
-          tile.textContent = p.category.slice(0, 1).toUpperCase();
+          tile.classList.add("grid", "place-items-center", "text-2xl");
+          tile.textContent = CATEGORY_EMOJI[p.category] ?? CATEGORY_EMOJI.other;
         }
         const label = document.createElement("span");
         label.setAttribute("aria-hidden", "true");
         label.textContent = p.name;
         label.className =
-          "pointer-events-none absolute top-full left-1/2 mt-1 max-w-32 -translate-x-1/2 truncate rounded-pill bg-white/90 px-2 py-0.5 text-[11px] leading-tight font-semibold text-ink shadow-soft";
+          "map-pin-label pointer-events-none absolute top-full left-1/2 mt-1 max-w-32 -translate-x-1/2 truncate rounded-pill bg-white/90 px-2 py-0.5 text-[11px] leading-tight font-semibold text-ink shadow-soft";
         el.append(tile, label);
         el.addEventListener("click", (ev) => {
           ev.stopPropagation();
           if (addModeRef.current) return;
           setSelectedId(p.id);
-          // On phones the bottom sheet covers the lower half, so keep the pin in the visible top part.
-          const bottom = window.innerWidth < 640 ? Math.round(map.getContainer().clientHeight * 0.55) : 0;
-          map.easeTo({ center: [p.lng, p.lat], zoom: Math.max(map.getZoom(), 12), duration: 600, padding: { bottom } });
         });
         return new MarkerCtor({ element: el }).setLngLat([p.lng, p.lat]).addTo(map);
       });
@@ -197,6 +215,18 @@ export function MapView({ places }: { places: MapPlace[] }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, places, userPlaces, selectedId]);
+
+  // Fly to whichever place gets selected (pin tap or the hidden list).
+  useEffect(() => {
+    const map = mapRef.current;
+    const p = [...places, ...userPlaces].find((x) => x.id === selectedId);
+    if (!map || !mapReady || !p) return;
+    // On phones the bottom sheet covers the lower half, so keep the pin in the visible top part.
+    const bottom = window.innerWidth < 640 ? Math.round(map.getContainer().clientHeight * 0.55) : 0;
+    map.easeTo({ center: [p.lng, p.lat], zoom: Math.max(map.getZoom(), 14), duration: 600, padding: { bottom } });
+    // Only re-run when the selection changes, not when the lists update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, mapReady]);
 
   // Escape closes the card / cancels add mode.
   useEffect(() => {
