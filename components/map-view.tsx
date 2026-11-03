@@ -6,9 +6,11 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MapLibreMap, Marker } from "maplibre-gl";
 import Supercluster from "supercluster";
 import { canWarm, embedFor } from "@/lib/social";
+import { distanceMeters, findExisting, searchPlaces, type PlaceResult } from "@/lib/geocode";
 import { useEffect, useRef, useState } from "react";
 
 export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string; thumb?: string };
+export type DraftPoint = { lat: number; lng: number; name?: string; city?: string; category?: string };
 export type Photo = { src: string; alt: string; credit?: string; creditUrl?: string };
 export type MapPlace = {
   id: string;
@@ -164,7 +166,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [userPlaces, setUserPlaces] = useState<MapPlace[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [draftPoint, setDraftPoint] = useState<{ lat: number; lng: number } | null>(null);
+  const [draftPoint, setDraftPoint] = useState<DraftPoint | null>(null);
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [full, setFull] = useState(false);
@@ -482,9 +484,20 @@ export function MapView({ places }: { places: MapPlace[] }) {
   function savePlace(p: MapPlace) {
     const next = [...userPlaces, p];
     setUserPlaces(next);
+    let stored = true;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {}
+    } catch {
+      stored = false;
+    }
+    if (stored) {
+      // Ask the browser not to evict our storage under pressure (best effort; Safari may still clear it after ~7 idle days).
+      try {
+        void navigator.storage?.persist?.();
+      } catch {}
+    } else {
+      setGeoError("Couldn't save this place on your device (private browsing?). It will be gone when you refresh.");
+    }
     setDraftPoint(null);
     setSelectedId(p.id);
   }
@@ -581,9 +594,25 @@ export function MapView({ places }: { places: MapPlace[] }) {
       </div>
 
       {adding && (
-        <p role="status" className="absolute top-16 left-3 z-10 rounded-pill bg-surface px-4 py-2 text-sm shadow-soft">
-          Tap the map where the place is
-        </p>
+        <PlaceSearch
+          getNear={() => {
+            const c = mapRef.current?.getCenter();
+            return c ? { lat: c.lat, lng: c.lng } : { lat: 42.36, lng: -71.06 };
+          }}
+          places={all}
+          onPick={(r) => {
+            setDraftPoint({ lat: r.lat, lng: r.lng, name: r.name, city: r.city, category: r.category });
+            setAdding(false);
+            const map = mapRef.current;
+            // Keep the spot visible above the form sheet on phones.
+            const bottom = window.innerWidth < 640 ? Math.round((map?.getContainer().clientHeight ?? 0) * 0.55) : 0;
+            map?.easeTo({ center: [r.lng, r.lat], zoom: Math.max(map.getZoom(), 16), duration: 600, padding: { bottom } });
+          }}
+          onPickExisting={(p) => {
+            setAdding(false);
+            setSelectedId(p.id);
+          }}
+        />
       )}
 
       {selected && !draftPoint && (
@@ -650,6 +679,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
       {draftPoint && (
         <AddPlaceForm
           point={draftPoint}
+          defaultCity={nearestCity(draftPoint, all)}
           onCancel={() => setDraftPoint(null)}
           onSave={(p) => savePlace(p)}
         />
@@ -658,25 +688,44 @@ export function MapView({ places }: { places: MapPlace[] }) {
   );
 }
 
+/** The city of the closest saved place within ~50km, so tapped-map drops start with a sensible city. */
+function nearestCity(point: { lat: number; lng: number }, places: MapPlace[]): string {
+  let best: MapPlace | undefined;
+  let bestD = 50_000;
+  for (const p of places) {
+    const d = distanceMeters(point, p);
+    if (d < bestD) {
+      best = p;
+      bestD = d;
+    }
+  }
+  return best?.city ?? "";
+}
+
 function AddPlaceForm({
   point,
+  defaultCity,
   onSave,
   onCancel,
 }: {
-  point: { lat: number; lng: number };
+  point: DraftPoint;
+  defaultCity: string;
   onSave: (p: MapPlace) => void;
   onCancel: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
-  useEffect(() => nameRef.current?.focus(), []);
+  // Picked from search: details are filled in already, so do not pop the keyboard.
+  useEffect(() => {
+    if (!point.name) nameRef.current?.focus();
+  }, [point.name]);
 
   function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
     const url = String(f.get("url") ?? "").trim();
-    const platform = platformOf(url);
-    if (!platform) return setError("Link must be a TikTok or Instagram URL (https://…).");
+    const platform = url ? platformOf(url) : undefined;
+    if (url && !platform) return setError("That link must be a TikTok or Instagram URL (https://…), or leave it blank.");
     const photo = String(f.get("photo") ?? "").trim();
     const name = String(f.get("name")).trim();
     onSave({
@@ -688,7 +737,7 @@ function AddPlaceForm({
       lng: point.lng,
       description: String(f.get("description") ?? "").trim(),
       photos: photo.startsWith("https://") ? [{ src: photo, alt: name }] : [],
-      links: [{ platform, url }],
+      links: url && platform ? [{ platform, url }] : [],
       userAdded: true,
     });
   }
@@ -703,15 +752,15 @@ function AddPlaceForm({
       <h2 className="text-lg font-semibold">Add a place</h2>
       <label className="block text-sm font-semibold">
         Name
-        <input ref={nameRef} name="name" required className={field} />
+        <input ref={nameRef} name="name" required defaultValue={point.name} className={field} />
       </label>
       <label className="block text-sm font-semibold">
         City
-        <input name="city" required className={field} />
+        <input name="city" required defaultValue={point.city || defaultCity} className={field} />
       </label>
       <label className="block text-sm font-semibold">
         Category
-        <select name="category" className={field} defaultValue="food">
+        <select name="category" className={field} defaultValue={point.category ?? "food"}>
           {CATEGORIES.map((c) => (
             <option key={c} value={c}>
               {c}
@@ -720,8 +769,8 @@ function AddPlaceForm({
         </select>
       </label>
       <label className="block text-sm font-semibold">
-        TikTok or Instagram link
-        <input name="url" type="url" required inputMode="url" placeholder="https://www.tiktok.com/…" className={field} />
+        TikTok or Instagram link (optional)
+        <input name="url" type="url" inputMode="url" placeholder="https://www.tiktok.com/…" className={field} />
       </label>
       <label className="block text-sm font-semibold">
         Photo link (optional)
@@ -904,5 +953,106 @@ function OtherLinks({ place }: { place: MapPlace }) {
         ),
       )}
     </ul>
+  );
+}
+
+/** Search box for the Add flow: type a place name, pick a result, and its details and spot are filled in. */
+function PlaceSearch({
+  getNear,
+  places,
+  onPick,
+  onPickExisting,
+}: {
+  getNear: () => { lat: number; lng: number };
+  places: MapPlace[];
+  onPick: (r: PlaceResult) => void;
+  onPickExisting: (p: MapPlace) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<PlaceResult[]>([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setResults([]);
+      setStatus("idle");
+      return;
+    }
+    setStatus("loading");
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      try {
+        setResults(await searchPlaces(term, getNear(), { signal: ctrl.signal }));
+        setStatus("done");
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") setStatus("error");
+      }
+    }, 300);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+    // getNear reads the live map centre; it is intentionally not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  const rows = results.map((r) => ({ r, existing: findExisting(r, places) }));
+  const choose = (row: (typeof rows)[number]) => (row.existing ? onPickExisting(row.existing) : onPick(row.r));
+
+  return (
+    <form
+      role="search"
+      aria-label="Search for a place to add"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (rows[0]) choose(rows[0]);
+      }}
+      className="absolute inset-x-3 top-16 z-20 max-h-[60%] overflow-y-auto rounded-card bg-surface p-3 shadow-soft sm:right-auto sm:w-96"
+    >
+      <input
+        ref={inputRef}
+        type="search"
+        inputMode="search"
+        enterKeyHint="search"
+        autoComplete="off"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        aria-label="Search for a place"
+        placeholder="Search for a place, e.g. Neptune Oyster"
+        className="block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base"
+      />
+      <div aria-live="polite">
+        {status === "loading" && <p className="px-2 pt-3 text-sm text-muted">Searching…</p>}
+        {status === "error" && (
+          <p className="px-2 pt-3 text-sm">Search isn&apos;t available right now. You can still tap the map to drop a pin.</p>
+        )}
+        {status === "done" && rows.length === 0 && (
+          <p className="px-2 pt-3 text-sm">No matches. Try the name plus the city, or tap the map to drop a pin.</p>
+        )}
+      </div>
+      {rows.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {rows.map((row) => (
+            <li key={row.r.id}>
+              <button type="button" onClick={() => choose(row)} className="flex min-h-11 w-full items-center gap-3 rounded-2xl px-2 py-1.5 text-left hover:bg-tag">
+                <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-xl bg-tag text-lg">
+                  {CATEGORY_EMOJI[row.r.category] ?? CATEGORY_EMOJI.other}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{row.r.name}</span>
+                  {row.r.detail && <span className="block truncate text-xs text-muted">{row.r.detail}</span>}
+                </span>
+                {row.existing && <span className="shrink-0 rounded-pill bg-tag px-2 py-0.5 text-xs font-semibold">On the map</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="px-2 pt-3 text-xs text-muted">Or tap the map to drop a pin. Search by Photon · © OpenStreetMap contributors</p>
+    </form>
   );
 }

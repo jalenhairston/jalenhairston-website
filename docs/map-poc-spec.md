@@ -13,7 +13,7 @@ A `/map` page: a global, zoomable map (Apple/Google Maps style) of things to do 
 | Posts | TikTok (primary), Instagram. Link out in a new tab (`noopener noreferrer`); no embeds. |
 | Interaction | Tap pin → bottom sheet on mobile, floating card on desktop. Esc / × closes. |
 | Filtering | None. |
-| Visitor adds | "+ Add place": tap map, fill form. Saved in the visitor's `localStorage` only (no backend). "Copy as content file" outputs markdown to promote it into `content/places/`. |
+| Visitor adds | "+ Add place": search for the place by name (Photon, falling back to Nominatim; both free/keyless/OpenStreetMap) and pick a result to pre-fill name, city, category and exact spot, or tap the map to drop a pin. TikTok/Instagram link, photo and description are optional. Results already within 15m of a saved place (or the same name nearby) open that place instead of adding a duplicate. Saved in the visitor's `localStorage` only (no backend): it survives refreshes and restarts on that browser, but not other devices, cleared site data, or private browsing; a save failure now shows a warning. "Copy as content file" outputs markdown to promote it into `content/places/`. |
 | Navigation | `Map` entry in the menu pill. |
 | Styling | Reuses the existing design tokens; mobile-first, 44px+ touch targets. |
 | Later | AI-assistant integration; real submissions/moderation; Neon storage; clustering. |

@@ -468,6 +468,112 @@ test.describe("things-to-do map (POC)", () => {
     await context.close();
   });
 
+  test.describe("adding a place by searching for it", () => {
+    const photon = {
+      features: [
+        {
+          geometry: { coordinates: [-71.0745, 42.3535] },
+          properties: { name: "Tatte Bakery & Cafe", osm_key: "amenity", osm_value: "cafe", street: "Newbury Street", housenumber: "399", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: "1" },
+        },
+        {
+          // On top of the existing Mike's Pastry entry, so it should be recognised as already on the map.
+          geometry: { coordinates: [-71.0542, 42.3642] },
+          properties: { name: "Mike's Pastry", osm_key: "shop", osm_value: "bakery", street: "Hanover Street", housenumber: "300", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: "2" },
+        },
+      ],
+    };
+    const stub = async (page: Page) => {
+      await page.route("https://tiles.openfreemap.org/**", (route) =>
+        route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+      );
+      await page.route("https://photon.komoot.io/**", (route) => route.fulfill({ json: photon }));
+    };
+    const openSearch = async (page: Page) => {
+      await page.goto("/map");
+      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+      await page.getByRole("button", { name: "+ Add place" }).click();
+      return page.getByRole("search", { name: "Search for a place to add" });
+    };
+
+    test("search results fill in the form, a link is optional, and the place survives a refresh", async ({ page }) => {
+      await stub(page);
+      const search = await openSearch(page);
+      await search.getByRole("searchbox", { name: "Search for a place" }).fill("tatte");
+      await search.getByRole("button", { name: /Tatte Bakery & Cafe/ }).click();
+
+      const form = page.getByRole("form", { name: "Add a place" });
+      await expect(form.getByLabel("Name")).toHaveValue("Tatte Bakery & Cafe");
+      await expect(form.getByLabel("City")).toHaveValue("Boston");
+      await expect(form.getByLabel("Category")).toHaveValue("coffee");
+      await form.getByRole("button", { name: "Save" }).click(); // no TikTok/Instagram link needed
+
+      const card = page.getByRole("region", { name: "Tatte Bakery & Cafe" });
+      await expect(card).toBeVisible();
+      await expect(card).toContainText("added by you");
+      await expect(card.getByRole("link", { name: /^TikTok/ })).toHaveAttribute("href", /tiktok\.com\/search\?q=Tatte/);
+      await expect(card.getByRole("link", { name: /Open in Apple Maps/ })).toHaveAttribute("href", /ll=42\.3535,-71\.0745/);
+
+      // Survives a refresh: it is reloaded from this device's storage.
+      await page.reload();
+      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+      await page.getByRole("button", { name: "Tatte Bakery & Cafe, Boston (coffee)" }).dispatchEvent("click");
+      const again = page.getByRole("region", { name: "Tatte Bakery & Cafe" });
+      await expect(again).toBeVisible();
+      await expect(again).toContainText("added by you");
+
+      // ...and removing it sticks too.
+      await again.getByRole("button", { name: "Remove" }).click();
+      await page.reload();
+      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+      await expect(page.getByRole("button", { name: /Tatte Bakery & Cafe/ })).toHaveCount(0);
+    });
+
+    test("a search result that is already on the map opens it instead of adding a duplicate", async ({ page }) => {
+      await stub(page);
+      const search = await openSearch(page);
+      await search.getByRole("searchbox", { name: "Search for a place" }).fill("mike");
+      const row = search.getByRole("button", { name: /Mike's Pastry/ });
+      await expect(row).toContainText("On the map");
+      await row.click();
+      await expect(page.getByRole("region", { name: "Mike's Pastry" })).toBeVisible();
+      await expect(page.getByRole("form", { name: "Add a place" })).toHaveCount(0);
+    });
+
+    test("falls back to a second search service, then explains if both are down", async ({ page }) => {
+      await page.route("https://tiles.openfreemap.org/**", (route) =>
+        route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+      );
+      await page.route("https://photon.komoot.io/**", (route) => route.fulfill({ status: 503, body: "down" }));
+      let nominatimUp = true;
+      await page.route("https://nominatim.openstreetmap.org/**", (route) =>
+        nominatimUp
+          ? route.fulfill({ json: [{ lat: "42.35", lon: "-71.07", name: "Backup Result Cafe", category: "amenity", type: "cafe", address: { city: "Boston" } }] })
+          : route.fulfill({ status: 500, body: "down" }),
+      );
+      const search = await openSearch(page);
+      const box = search.getByRole("searchbox", { name: "Search for a place" });
+      await box.fill("backup result");
+      await expect(search.getByRole("button", { name: /Backup Result Cafe/ })).toBeVisible();
+      nominatimUp = false;
+      await box.fill("another thing entirely");
+      await expect(search.getByText(/Search isn't available right now/)).toBeVisible();
+    });
+
+    test("warns when the browser refuses to save, instead of silently losing the place", async ({ page }) => {
+      await page.addInitScript(() => {
+        Storage.prototype.setItem = () => {
+          throw new DOMException("blocked", "QuotaExceededError");
+        };
+      });
+      await stub(page);
+      const search = await openSearch(page);
+      await search.getByRole("searchbox", { name: "Search for a place" }).fill("tatte");
+      await search.getByRole("button", { name: /Tatte Bakery & Cafe/ }).click();
+      await page.getByRole("form", { name: "Add a place" }).getByRole("button", { name: "Save" }).click();
+      await expect(page.getByText(/Couldn't save this place on your device/)).toBeVisible();
+    });
+  });
+
   test("menu links to the map", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Menu" }).click();
