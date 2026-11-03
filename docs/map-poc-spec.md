@@ -25,3 +25,25 @@ Filters/search, embeds, server-side submissions, auth, clustering, offline.
 - Seed places are `sample: true` placeholders linking to platform search pages, not real posts (keeps the site `noindex`).
 - Overlapping pins at world zoom (e.g. 3 in Atlanta) until zoomed in.
 - Visitor-added places are device-local.
+
+## Social embeds & caching (TikTok / Instagram)
+
+**What the card does.** The TikTok dropdown lists each saved video as a thumbnail row. Tapping a row swaps in the official TikTok embed (`/embed/v2/<id>`) in a sandboxed iframe. Saved Instagram reels/posts get the same row (`/reel/<code>/embed/captioned/`). Anything that is not a single video (search, profile, tag, place page) stays a plain link.
+
+**Data flow.** `content/places/*.md` holds the links. `npm run social:refresh` reads every TikTok video link, loads the video page, downloads the cover image, resizes it (270x480 JPEG), and saves it to `public/social/tt-<id>-<hash>.jpg`; it records `video id -> thumb` in `content/social.json`. `lib/content.ts` merges that into each link at build time, so the page ships with everything it needs and the dropdown renders with no runtime requests.
+
+**Why thumbnails are self-hosted.** TikTok cover URLs are signed and expire in ~48h, so they cannot be stored or hotlinked. (Caveat: these are thumbnails of third-party videos; fine for a private POC, revisit before a public launch.)
+
+**Background warm-up.** When a place is broken out of its cluster, its thumbnails are fetched at idle priority (`requestIdleCallback`), nearest to the map centre first, capped at 30 places and 4 thumbs per place per session, and skipped on Save-Data / 2G. Opening a card warms that place immediately and preconnects to the embed host on first dropdown open / play.
+
+**What is deliberately not pre-loaded: the embeds.** TikTok and Instagram serve embed pages `cache-control: no-store` and each is ~1MB of third-party JS, so pre-loading them would cost bandwidth and memory and could not be reused. They load on tap only.
+
+**Cache policy.**
+| Asset | Policy |
+|---|---|
+| `/social/*.jpg` | `public, max-age=31536000, immutable` (next.config.ts). Content-hashed names; a changed cover gets a new filename. |
+| Page + content (incl. caption text) | Static, rebuilt per deploy. |
+| Embeds | Never cached by us; loaded on demand. |
+| Freshness | Re-run `npm run social:refresh -- --force` periodically (or on a schedule) to pick up new covers; videos that were deleted are reported as "unavailable". |
+
+**Instagram status.** Embed support is implemented but unverified: Instagram does not index individual reels (searches only return profile pages) and its profile embed sends `X-Frame-Options: DENY`, so no reel links are populated. Paste a real reel URL into a place's `links:` (`platform: instagram`) to use it; if it does not embed, the row's ↗ button still opens it on Instagram.

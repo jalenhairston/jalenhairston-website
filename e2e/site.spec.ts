@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -299,6 +300,67 @@ test.describe("things-to-do map (POC)", () => {
     // No image-reference links under the photos; the post links end with Google.
     await expect(sheet.getByRole("link", { name: /Wikimedia Commons/ })).toHaveCount(0);
     await expect(sheet.getByRole("link").last()).toHaveText(/Google/);
+  });
+
+  test("TikTok rows show thumbnails; the embed loads only when a row is played", async ({ page }) => {
+    const embedRequests: string[] = [];
+    page.on("request", (r) => /tiktok\.com\/embed\//.test(r.url()) && embedRequests.push(r.url()));
+    await page.route("https://www.tiktok.com/embed/**", (route) =>
+      route.fulfill({ contentType: "text/html", body: "<html><body>stub player</body></html>" }),
+    );
+    await page.goto("/map");
+    await page.getByRole("button", { name: "Neptune Oyster, Boston (food)" }).dispatchEvent("click");
+    const sheet = page.getByRole("region", { name: "Neptune Oyster" });
+    await sheet.locator("details summary").click();
+    const thumbs = sheet.locator("details img");
+    await expect(thumbs).toHaveCount(3);
+    await expect.poll(() => thumbs.evaluateAll((els) => els.every((i) => (i as HTMLImageElement).naturalWidth > 0))).toBe(true);
+    // Opening the dropdown does not load any embed.
+    expect(embedRequests).toHaveLength(0);
+    await expect(sheet.locator("iframe")).toHaveCount(0);
+    // Tapping a row swaps in the official embed, in a sandboxed iframe.
+    await sheet.getByRole("button", { name: /^Play:/ }).first().click();
+    const frame = sheet.locator("iframe");
+    await expect(frame).toHaveAttribute("src", /^https:\/\/www\.tiktok\.com\/embed\/v2\/\d+$/);
+    await expect(frame).toHaveAttribute("sandbox", /allow-scripts/);
+    await expect.poll(() => embedRequests.length).toBe(1);
+    // Close the player to go back to the thumbnail row.
+    await sheet.getByRole("button", { name: "Close player" }).click();
+    await expect(sheet.locator("iframe")).toHaveCount(0);
+  });
+
+  test("thumbnails for places broken out of a cluster are warmed in the background", async ({ page }) => {
+    const thumbRequests: string[] = [];
+    const embedRequests: string[] = [];
+    page.on("request", (r) => {
+      if (/\/social\/tt-\d+-\w+\.jpg/.test(r.url())) thumbRequests.push(r.url());
+      if (/tiktok\.com\/embed\//.test(r.url())) embedRequests.push(r.url());
+    });
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("/map");
+    const clusters = page.locator('button[aria-label$="places, zoom in"]');
+    await expect(clusters.first()).toBeVisible();
+    // Break the big cluster apart; places that become individual pins get warmed.
+    const pins = page.locator("button.map-pin");
+    for (let i = 0; i < 8 && (await pins.count()) < 6; i++) {
+      await clusters.first().click({ force: true });
+      await page.waitForTimeout(700);
+    }
+    await expect.poll(() => thumbRequests.length, { timeout: 10_000 }).toBeGreaterThan(0);
+    // No card was opened and no embed was loaded: warm-up only touches our own thumbnails.
+    await expect(page.getByTestId("map-shell").getByRole("button", { name: "Close", exact: true })).toHaveCount(0);
+    expect(embedRequests).toHaveLength(0);
+  });
+
+  test("thumbnails are served as immutable, long-lived assets", async ({ request }) => {
+    const items = JSON.parse(fs.readFileSync("content/social.json", "utf8")).items as Record<string, { thumb?: string }>;
+    const thumb = Object.values(items).find((i) => i.thumb)!.thumb!;
+    const res = await request.get(thumb);
+    expect(res.status()).toBe(200);
+    expect(res.headers()["content-type"]).toContain("image/jpeg");
+    expect(res.headers()["cache-control"]).toMatch(/max-age=31536000.*immutable/);
   });
 
   test("places with no saved TikToks show a TikTok search link instead of a dropdown", async ({ page }) => {

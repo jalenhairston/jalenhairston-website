@@ -7,6 +7,7 @@ import { remark } from "remark";
 import remarkRehype from "remark-rehype";
 import rehypeStringify from "rehype-stringify";
 import { z } from "zod";
+import { parseTikTok } from "./social";
 
 const yearMonth = z
   .string()
@@ -96,7 +97,7 @@ const placeSchema = z.object({
   lat: z.number().min(-90).max(90),
   lng: z.number().min(-180).max(180),
   links: z
-    .array(z.object({ platform: z.enum(postPlatforms), url: z.url(), title: z.string().optional() }))
+    .array(z.object({ platform: z.enum(postPlatforms), url: z.url(), title: z.string().optional(), thumb: publicPath.optional() }))
     .default([]),
 });
 
@@ -165,6 +166,7 @@ export function getContent(dir: string = DEFAULT_DIR): Content {
   const projects: Project[] = collection(projectSchema, "projects");
   const stories: Story[] = collection(storySchema, "stories");
   const places: Place[] = collection(placeSchema, "places");
+  mergeSocialThumbs(places, dir, problems);
 
   checkIntegrity({ skills, roles, projects, stories }, problems, (sub) => rel(path.join(/*turbopackIgnore: true*/ dir, sub)));
   if (problems.length > 0 || !profile) {
@@ -176,6 +178,26 @@ export function getContent(dir: string = DEFAULT_DIR): Content {
   const content: Content = { profile: { ...profileFields, body, html }, skills, roles, projects, stories, places, sampleFiles };
   if (dir === DEFAULT_DIR) cached = content;
   return content;
+}
+
+/** content/social.json (written by `npm run social:refresh`) maps TikTok video id -> self-hosted thumbnail. */
+function mergeSocialThumbs(places: Place[], dir: string, problems: string[]) {
+  const file = path.join(/*turbopackIgnore: true*/ dir, "social.json");
+  if (!fs.existsSync(file)) return;
+  let items: Record<string, { thumb?: string; status?: string }>;
+  try {
+    items = JSON.parse(fs.readFileSync(file, "utf8")).items ?? {};
+  } catch {
+    problems.push("content/social.json: not valid JSON (re-run `npm run social:refresh`)");
+    return;
+  }
+  for (const place of places) {
+    for (const link of place.links) {
+      const id = link.platform === "tiktok" ? parseTikTok(link.url)?.id : undefined;
+      const thumb = id ? items[id]?.thumb : undefined;
+      if (thumb) link.thumb = thumb;
+    }
+  }
 }
 
 type Collections = Pick<Content, "skills" | "roles" | "projects" | "stories">;

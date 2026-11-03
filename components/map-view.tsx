@@ -5,9 +5,10 @@
 import "maplibre-gl/dist/maplibre-gl.css";
 import type { Map as MapLibreMap, Marker } from "maplibre-gl";
 import Supercluster from "supercluster";
+import { canWarm, embedFor } from "@/lib/social";
 import { useEffect, useRef, useState } from "react";
 
-export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string };
+export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string; thumb?: string };
 export type Photo = { src: string; alt: string; credit?: string; creditUrl?: string };
 export type MapPlace = {
   id: string;
@@ -38,7 +39,7 @@ const CATEGORY_EMOJI: Record<string, string> = {
 /** Pins cluster up to this zoom; selecting a place flies one level past it so it always shows alone. */
 const CLUSTER_MAX_ZOOM = 14;
 const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram", google: "Google" } as const;
-type ShownLink = { platform: keyof typeof PLATFORM_LABEL; url: string; title?: string };
+type ShownLink = { platform: keyof typeof PLATFORM_LABEL; url: string; title?: string; thumb?: string };
 
 function platformOf(url: string): PostLink["platform"] | undefined {
   try {
@@ -72,6 +73,63 @@ function otherLinks(p: MapPlace): ShownLink[] {
     ...p.links.filter((l) => l.platform === "instagram"),
     { platform: "google", url: googleSearchUrl(p), title: `Search “${p.name}”` },
   ];
+}
+
+// --- Background warm-up -------------------------------------------------------------------------
+// When a place is broken out of a cluster we pre-fetch its (self-hosted, immutable) video thumbnails
+// at idle priority, nearest to the map centre first, so the TikTok dropdown opens instantly.
+// The embeds themselves are never pre-loaded: TikTok/Instagram serve them `no-store` (uncacheable,
+// ~1MB each), so they only load when someone taps play.
+const MAX_WARM_PLACES = 30;
+const THUMBS_PER_PLACE = 4;
+const warmed = new Set<string>();
+const warmQueue: MapPlace[] = [];
+const warmImages: HTMLImageElement[] = []; // keep references until loaded
+let warmScheduled = false;
+
+function warmNow(p: MapPlace) {
+  if (warmed.has(p.id) || warmed.size >= MAX_WARM_PLACES) return;
+  warmed.add(p.id);
+  for (const l of p.links.filter((x) => x.thumb).slice(0, THUMBS_PER_PLACE)) {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = l.thumb!;
+    warmImages.push(img);
+  }
+}
+
+function drainWarmQueue() {
+  warmScheduled = false;
+  for (let i = 0; i < 2 && warmQueue.length; i++) warmNow(warmQueue.shift()!);
+  if (warmQueue.length) scheduleDrain();
+}
+
+function scheduleDrain() {
+  if (warmScheduled) return;
+  warmScheduled = true;
+  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+  if (w.requestIdleCallback) w.requestIdleCallback(drainWarmQueue, { timeout: 2000 });
+  else setTimeout(drainWarmQueue, 200);
+}
+
+function warmPlaces(places: MapPlace[], center: { lat: number; lng: number }) {
+  if (!canWarm((navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection)) return;
+  const dist = (p: MapPlace) => (p.lat - center.lat) ** 2 + (p.lng - center.lng) ** 2;
+  for (const p of places) {
+    if (warmed.has(p.id) || warmQueue.some((q) => q.id === p.id) || !p.links.some((l) => l.thumb)) continue;
+    warmQueue.push(p);
+  }
+  warmQueue.sort((a, b) => dist(a) - dist(b));
+  if (warmQueue.length) scheduleDrain();
+}
+
+/** Open a connection to the embed host just before it is needed (first dropdown open / play). */
+function preconnect(origin: string) {
+  if (document.head.querySelector(`link[rel="preconnect"][href="${origin}"]`)) return;
+  const link = document.createElement("link");
+  link.rel = "preconnect";
+  link.href = origin;
+  document.head.append(link);
 }
 
 function loadUserPlaces(): MapPlace[] {
@@ -258,12 +316,28 @@ export function MapView({ places }: { places: MapPlace[] }) {
         });
         return new MarkerCtor({ element: el }).setLngLat([lng, lat]).addTo(map);
       });
+      // Places now showing as individual pins get their thumbnails warmed in the background.
+      const c = map.getCenter();
+      warmPlaces(
+        items.flatMap((it) => {
+          const props = it.properties as { cluster?: boolean; id?: string };
+          return props.cluster ? [] : [byId.get(props.id as string)!];
+        }),
+        { lat: c.lat, lng: c.lng },
+      );
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapReady, places, userPlaces, selectedId, zoom]);
+
+  // Opening a card warms that place's thumbnails right away (no-op if already warmed).
+  useEffect(() => {
+    const p = [...places, ...userPlaces].find((x) => x.id === selectedId);
+    if (p) warmNow(p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
 
   // Fly to whichever place gets selected (pin tap or the hidden list).
   useEffect(() => {
@@ -543,72 +617,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
           )}
           {selected.description && <p className="mt-3 text-sm whitespace-pre-line">{selected.description}</p>}
           <div className="mt-4 space-y-2">
-            {(() => {
-              const { saved, search } = tiktokLinks(selected);
-              const linkClass = "flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm";
-              if (saved.length === 0) {
-                return (
-                  <a href={search.url} target="_blank" rel="noopener noreferrer" className={`${linkClass} bg-accent font-semibold text-accent-ink`}>
-                    <span>
-                      TikTok<span className="font-normal opacity-80"> · {search.title}</span>
-                    </span>
-                    <span aria-hidden>↗</span>
-                    <span className="sr-only">(opens in a new tab)</span>
-                  </a>
-                );
-              }
-              return (
-                <details key={selected.id} className="group rounded-[1.375rem] bg-accent text-accent-ink">
-                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
-                    <span>
-                      TikTok
-                      <span className="font-normal opacity-80">
-                        {" "}
-                        · {saved.length} {saved.length === 1 ? "link" : "links"}
-                      </span>
-                    </span>
-                    <span aria-hidden className="transition-transform group-open:rotate-180">
-                      ▾
-                    </span>
-                  </summary>
-                  <ul className="space-y-1 px-2 pb-2">
-                    {[...saved, search].map((l) => (
-                      <li key={l.url}>
-                        <a
-                          href={l.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className={`${linkClass} bg-white/15 hover:bg-white/25`}
-                        >
-                          <span className="line-clamp-2">{l.title ?? l.url}</span>
-                          <span aria-hidden>↗</span>
-                          <span className="sr-only">(opens in a new tab)</span>
-                        </a>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              );
-            })()}
-            <ul className="space-y-2">
-              {otherLinks(selected).map((l) => (
-                <li key={l.url}>
-                  <a
-                    href={l.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex min-h-11 items-center justify-between gap-3 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
-                  >
-                    <span>
-                      {PLATFORM_LABEL[l.platform]}
-                      {l.title && <span className="font-normal text-muted"> · {l.title}</span>}
-                    </span>
-                    <span aria-hidden>↗</span>
-                    <span className="sr-only">(opens in a new tab)</span>
-                  </a>
-                </li>
-              ))}
-            </ul>
+            <TikTokSection key={selected.id} place={selected} />
+            <OtherLinks key={selected.id} place={selected} />
           </div>
           {selected.userAdded && (
             <div className="mt-4 flex gap-2 text-sm">
@@ -722,5 +732,163 @@ function AddPlaceForm({
         </button>
       </div>
     </form>
+  );
+}
+
+const rowLink = "flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm";
+
+/** TikTok dropdown: each saved video is a thumbnail row; tapping it swaps in the official embed. */
+function TikTokSection({ place }: { place: MapPlace }) {
+  const { saved, search } = tiktokLinks(place);
+  const [playing, setPlaying] = useState<string | null>(null);
+
+  if (saved.length === 0) {
+    return (
+      <a href={search.url} target="_blank" rel="noopener noreferrer" className={`${rowLink} bg-accent font-semibold text-accent-ink`}>
+        <span>
+          TikTok<span className="font-normal opacity-80"> · {search.title}</span>
+        </span>
+        <span aria-hidden>↗</span>
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+    );
+  }
+  return (
+    <details
+      className="group rounded-[1.375rem] bg-accent text-accent-ink"
+      onToggle={(e) => {
+        if ((e.currentTarget as HTMLDetailsElement).open) preconnect("https://www.tiktok.com");
+      }}
+    >
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+        <span>
+          TikTok
+          <span className="font-normal opacity-80">
+            {" "}
+            · {saved.length} {saved.length === 1 ? "link" : "links"}
+          </span>
+        </span>
+        <span aria-hidden className="transition-transform group-open:rotate-180">
+          ▾
+        </span>
+      </summary>
+      <ul className="space-y-1 px-2 pb-2">
+        {[...saved, search].map((l) => (
+          <EmbedRow key={l.url} link={l} brand="TikTok" tone="accent" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+type EmbedRowProps = { link: ShownLink; brand: "TikTok" | "Instagram"; tone: "accent" | "light"; playing: boolean; onPlay: () => void; onClose: () => void };
+
+function EmbedRow({ link, brand, tone, playing, onPlay, onClose }: EmbedRowProps) {
+  const embed = embedFor(link);
+  const origin = brand === "TikTok" ? "https://www.tiktok.com" : "https://www.instagram.com";
+  const chip = tone === "accent" ? "bg-white/15 hover:bg-white/25" : "bg-tag hover:bg-line";
+  const open = (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`grid size-11 shrink-0 place-items-center rounded-pill ${chip}`}
+    >
+      <span aria-hidden>↗</span>
+      <span className="sr-only">{link.title ? `Open “${link.title}” on ${brand} (opens in a new tab)` : `Open on ${brand} (opens in a new tab)`}</span>
+    </a>
+  );
+
+  // Not a single video (search, profile, tag, place page): a plain link row.
+  if (!embed) {
+    return (
+      <li>
+        <a href={link.url} target="_blank" rel="noopener noreferrer" className={`${rowLink} ${chip}`}>
+          <span className="line-clamp-2">{link.title ?? link.url}</span>
+          <span aria-hidden>↗</span>
+          <span className="sr-only">(opens in a new tab)</span>
+        </a>
+      </li>
+    );
+  }
+
+  return (
+    <li className={`rounded-2xl p-2 ${tone === "accent" ? "bg-white/15" : "bg-tag"}`}>
+      {playing ? (
+        <div>
+          {/* Loaded only on tap: embeds are no-store and ~1MB, so they are never pre-fetched. */}
+          <iframe
+            src={embed.src}
+            title={embed.title}
+            loading="lazy"
+            allow="autoplay; fullscreen; encrypted-media; clipboard-write"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"
+            className="mx-auto block h-[520px] w-full max-w-[325px] rounded-xl bg-black"
+          />
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <button type="button" onClick={onClose} className={`min-h-11 rounded-pill px-4 text-sm font-semibold ${chip}`}>
+              Close player
+            </button>
+            {open}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              preconnect(origin);
+              onPlay();
+            }}
+            className="flex min-h-14 flex-1 items-center gap-3 rounded-xl text-left"
+            aria-label={`Play: ${link.title ?? `${brand} video`}`}
+          >
+            <span className="relative block h-16 w-12 shrink-0 overflow-hidden rounded-lg bg-black/30">
+              {link.thumb && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={link.thumb} alt="" loading="lazy" decoding="async" width={48} height={64} className="size-full object-cover" />
+              )}
+              <span aria-hidden className="absolute inset-0 grid place-items-center bg-black/25 text-lg">
+                ▶
+              </span>
+            </span>
+            <span className="line-clamp-3 text-sm">{link.title ?? `${brand} video`}</span>
+          </button>
+          {open}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/** Instagram search, any saved Instagram posts (reels play inline), then Google. */
+function OtherLinks({ place }: { place: MapPlace }) {
+  const [playing, setPlaying] = useState<string | null>(null);
+  return (
+    <ul className="space-y-2">
+      {otherLinks(place).map((l) =>
+        l.platform === "instagram" && embedFor(l) ? (
+          <EmbedRow key={l.url} link={l} brand="Instagram" tone="light" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+        ) : (
+          <li key={l.url}>
+            <a
+              href={l.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex min-h-11 items-center justify-between gap-3 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
+            >
+              <span>
+                {PLATFORM_LABEL[l.platform]}
+                {l.title && <span className="font-normal text-muted"> · {l.title}</span>}
+              </span>
+              <span aria-hidden>↗</span>
+              <span className="sr-only">(opens in a new tab)</span>
+            </a>
+          </li>
+        ),
+      )}
+    </ul>
   );
 }
