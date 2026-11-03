@@ -34,8 +34,6 @@ const CATEGORY_EMOJI: Record<string, string> = {
   shopping: "🛍️",
   other: "📍",
 };
-/** Below this zoom, pins shrink and hide their name so dense areas stay readable. */
-const FULL_PIN_ZOOM = 14;
 const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram" } as const;
 
 function platformOf(url: string): PostLink["platform"] | undefined {
@@ -129,14 +127,6 @@ export function MapView({ places }: { places: MapPlace[] }) {
         }
         map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
         map.addControl(new maplibre.GeolocateControl({ trackUserLocation: false }), "top-right");
-        map.on("zoom", () => {
-          const compact = map!.getZoom() < FULL_PIN_ZOOM;
-          markersRef.current.forEach((m) => {
-            const el = m.getElement();
-            // The selected pin stays full size.
-            el.dataset.compact = String(compact && el.style.zIndex !== "10");
-          });
-        });
         map.on("click", (e) => {
           if (!addModeRef.current) return;
           setDraftPoint({ lat: e.lngLat.lat, lng: e.lngLat.lng });
@@ -179,7 +169,6 @@ export function MapView({ places }: { places: MapPlace[] }) {
         el.setAttribute("aria-label", `${p.name}, ${p.city}`);
         const active = p.id === selectedId;
         el.className = `map-pin group relative block rounded-2xl transition-transform ${active ? "scale-110" : ""}`;
-        el.dataset.compact = String(!active && map.getZoom() < FULL_PIN_ZOOM);
         el.style.zIndex = active ? "10" : "1";
         const tile = document.createElement("span");
         tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] shadow-soft ${p.userAdded ? "border-amber-500" : "border-white"} ${p.photos[0] ? "bg-surface" : "bg-tag"}`;
