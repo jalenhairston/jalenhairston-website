@@ -300,6 +300,27 @@ test.describe("things-to-do map (POC)", () => {
     await expect(pin).toContainText("Borough Market");
   });
 
+  test("full screen button expands the map over the page and exits again", async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("/map");
+    const shell = page.getByTestId("map-shell");
+    const before = await shell.boundingBox();
+    expect(before!.height).toBeLessThan(812);
+    await page.getByRole("button", { name: "Full screen" }).click();
+    await expect(shell).toHaveAttribute("data-fullscreen", "true");
+    const box = await shell.boundingBox();
+    expect(box).toMatchObject({ x: 0, y: 0, width: 375, height: 812 });
+    expect(await hasHorizontalScroll(page)).toBe(false);
+    // Pins still work in full screen.
+    await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+    await page.getByRole("button", { name: "Exit full screen" }).click();
+    await expect(shell).toHaveAttribute("data-fullscreen", "false");
+    expect((await shell.boundingBox())!.height).toBeLessThan(812);
+  });
+
   test("menu links to the map", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Menu" }).click();

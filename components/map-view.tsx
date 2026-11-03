@@ -98,6 +98,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [draftPoint, setDraftPoint] = useState<{ lat: number; lng: number } | null>(null);
   const [copied, setCopied] = useState(false);
   const [zoom, setZoom] = useState(0);
+  const [full, setFull] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
 
   const all = [...places, ...userPlaces];
   const selected = all.find((p) => p.id === selectedId) ?? null;
@@ -265,17 +267,47 @@ export function MapView({ places }: { places: MapPlace[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId, mapReady]);
 
-  // Escape closes the card / cancels add mode.
+  // Escape closes the card / cancels add mode; with nothing open it leaves full screen.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      setSelectedId(null);
-      setAdding(false);
-      setDraftPoint(null);
+      if (selectedId || adding || draftPoint) {
+        setSelectedId(null);
+        setAdding(false);
+        setDraftPoint(null);
+      } else {
+        setFull(false);
+      }
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [selectedId, adding, draftPoint]);
+
+  // Full screen: a fixed overlay that works everywhere (iOS Safari has no Fullscreen API for
+  // elements), plus the native Fullscreen API where it exists to hide the browser chrome.
+  useEffect(() => {
+    if (!full) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    try {
+      shellRef.current?.requestFullscreen?.().catch(() => {});
+    } catch {}
+    const onChange = () => {
+      if (!document.fullscreenElement) setFull(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.body.style.overflow = prevOverflow;
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    };
+  }, [full]);
+
+  // The map must re-measure its container whenever the shell changes size.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => mapRef.current?.resize());
+    return () => cancelAnimationFrame(id);
+  }, [full, mapReady]);
 
   function savePlace(p: MapPlace) {
     const next = [...userPlaces, p];
@@ -305,7 +337,16 @@ export function MapView({ places }: { places: MapPlace[] }) {
   }
 
   return (
-    <div className="relative h-[calc(100dvh-9.5rem)] min-h-[26rem] overflow-hidden rounded-card bg-tag shadow-soft">
+    <div
+      ref={shellRef}
+      data-testid="map-shell"
+      data-fullscreen={full}
+      className={
+        full
+          ? "fixed inset-0 z-50 h-dvh overflow-hidden bg-tag"
+          : "relative h-[calc(100dvh-9.5rem)] min-h-[26rem] overflow-hidden rounded-card bg-tag shadow-soft"
+      }
+    >
       {/* MapLibre forces position:relative on its container, so size it via a wrapper. */}
       <div className={`absolute inset-0 ${adding ? "cursor-crosshair" : ""}`}>
         <div ref={containerRef} className="h-full w-full" />
@@ -328,21 +369,32 @@ export function MapView({ places }: { places: MapPlace[] }) {
         ))}
       </ul>
 
-      <button
-        type="button"
-        onClick={() => {
-          setSelectedId(null);
-          setDraftPoint(null);
-          setAdding((a) => !a);
-        }}
-        aria-pressed={adding}
-        className="absolute top-3 left-3 z-10 rounded-pill bg-accent px-4 py-2 text-sm font-semibold text-accent-ink shadow-soft"
-      >
-        {adding ? "Cancel" : "+ Add place"}
-      </button>
+      <div className="absolute top-3 left-3 z-10 flex gap-2" style={full ? { top: "max(0.75rem, env(safe-area-inset-top))" } : undefined}>
+        <button
+          type="button"
+          onClick={() => {
+            setSelectedId(null);
+            setDraftPoint(null);
+            setAdding((a) => !a);
+          }}
+          aria-pressed={adding}
+          className="min-h-11 rounded-pill bg-accent px-4 py-2 text-sm font-semibold text-accent-ink shadow-soft"
+        >
+          {adding ? "Cancel" : "+ Add place"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setFull((f) => !f)}
+          aria-pressed={full}
+          aria-label={full ? "Exit full screen" : "Full screen"}
+          className="grid min-h-11 min-w-11 place-items-center rounded-pill bg-surface px-3 text-base font-semibold shadow-soft"
+        >
+          <span aria-hidden>{full ? "✕" : "⛶"}</span>
+        </button>
+      </div>
 
       {adding && (
-        <p role="status" className="absolute top-14 left-3 z-10 rounded-pill bg-surface px-4 py-2 text-sm shadow-soft">
+        <p role="status" className="absolute top-16 left-3 z-10 rounded-pill bg-surface px-4 py-2 text-sm shadow-soft">
           Tap the map where the place is
         </p>
       )}
