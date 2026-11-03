@@ -617,8 +617,8 @@ export function MapView({ places }: { places: MapPlace[] }) {
           )}
           {selected.description && <p className="mt-3 text-sm whitespace-pre-line">{selected.description}</p>}
           <div className="mt-4 space-y-2">
-            <TikTokSection key={selected.id} place={selected} />
-            <OtherLinks key={selected.id} place={selected} />
+            <TikTokSection key={`tiktok-${selected.id}`} place={selected} />
+            <OtherLinks key={`other-${selected.id}`} place={selected} />
           </div>
           {selected.userAdded && (
             <div className="mt-4 flex gap-2 text-sm">

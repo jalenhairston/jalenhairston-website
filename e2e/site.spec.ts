@@ -363,6 +363,21 @@ test.describe("things-to-do map (POC)", () => {
     expect(res.headers()["cache-control"]).toMatch(/max-age=31536000.*immutable/);
   });
 
+  test("selecting place after place never leaves stale TikTok/Instagram sections behind", async ({ page }) => {
+    await page.goto("/map");
+    const names = ["Neptune Oyster, Boston", "Fenway, Boston", "Rochambeau, Boston", "Tony & Elaine's, Boston", "Mike's Pastry, Boston"];
+    for (const name of names) {
+      await page.getByRole("button", { name: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\(`) }).dispatchEvent("click");
+      const sheet = page.getByRole("region", { name: name.split(",")[0] });
+      await expect(sheet).toBeVisible();
+      // Exactly one set of link sections for the current place, whatever was selected before.
+      await expect(sheet.locator("details")).toHaveCount(name.startsWith("Tony") ? 0 : 1);
+      await expect(sheet.getByRole("link", { name: /^Instagram/ })).toHaveCount(1);
+      await expect(sheet.getByRole("link", { name: /^Google/ })).toHaveCount(1);
+      await expect(page.locator('section[aria-label]').filter({ has: page.locator("summary") })).toHaveCount(name.startsWith("Tony") ? 0 : 1);
+    }
+  });
+
   test("places with no saved TikToks show a TikTok search link instead of a dropdown", async ({ page }) => {
     await page.goto("/map");
     await page.getByRole("button", { name: /^Tony & Elaine's, Boston/ }).dispatchEvent("click");
