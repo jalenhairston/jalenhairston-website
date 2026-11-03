@@ -37,7 +37,8 @@ const CATEGORY_EMOJI: Record<string, string> = {
 };
 /** Pins cluster up to this zoom; selecting a place flies one level past it so it always shows alone. */
 const CLUSTER_MAX_ZOOM = 14;
-const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram" } as const;
+const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram", google: "Google" } as const;
+type ShownLink = { platform: keyof typeof PLATFORM_LABEL; url: string; title?: string };
 
 function platformOf(url: string): PostLink["platform"] | undefined {
   try {
@@ -54,15 +55,22 @@ const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${enco
 const instagramTag = (p: MapPlace) => p.name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, "");
 const instagramSearchUrl = (p: MapPlace) => `https://www.instagram.com/explore/tags/${instagramTag(p)}/`;
 
-/** TikTok first (search, then saved TikToks), then Instagram (search, then saved posts). */
-function orderedLinks(p: MapPlace): (PostLink & { title?: string })[] {
-  const saved = p.links.filter((l) => l.platform === "tiktok");
-  const ig = p.links.filter((l) => l.platform === "instagram");
+const googleSearchUrl = (p: MapPlace) => `https://www.google.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
+
+/** Saved TikToks for the dropdown, with a TikTok search as the last row (and the only one if none are saved). */
+function tiktokLinks(p: MapPlace): { saved: ShownLink[]; search: ShownLink } {
+  return {
+    saved: p.links.filter((l) => l.platform === "tiktok"),
+    search: { platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` },
+  };
+}
+
+/** Below the TikTok dropdown: Instagram (search, then saved posts), then Google. */
+function otherLinks(p: MapPlace): ShownLink[] {
   return [
-    { platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` },
-    ...saved,
     { platform: "instagram", url: instagramSearchUrl(p), title: `Search #${instagramTag(p)}` },
-    ...ig,
+    ...p.links.filter((l) => l.platform === "instagram"),
+    { platform: "google", url: googleSearchUrl(p), title: `Search “${p.name}”` },
   ];
 }
 
@@ -529,41 +537,79 @@ export function MapView({ places }: { places: MapPlace[] }) {
                 <li key={ph.src} className="shrink-0 snap-start">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={ph.src} alt={ph.alt} loading="lazy" className="h-32 w-44 rounded-2xl bg-tag object-cover" />
-                  {ph.credit && (
-                    <p className="mt-1 max-w-44 truncate text-[11px] text-muted">
-                      {ph.creditUrl ? (
-                        <a href={ph.creditUrl} target="_blank" rel="noopener noreferrer" className="underline">
-                          {ph.credit}
-                        </a>
-                      ) : (
-                        ph.credit
-                      )}
-                    </p>
-                  )}
                 </li>
               ))}
             </ul>
           )}
           {selected.description && <p className="mt-3 text-sm whitespace-pre-line">{selected.description}</p>}
-          <ul className="mt-4 space-y-2">
-            {orderedLinks(selected).map((l, i) => (
-              <li key={l.url}>
-                <a
-                  href={l.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className={`flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold ${i === 0 ? "bg-accent text-accent-ink" : "bg-tag"}`}
-                >
-                  <span>
-                    {PLATFORM_LABEL[l.platform]}
-                    {l.title && <span className={`font-normal ${i === 0 ? "opacity-80" : "text-muted"}`}> · {l.title}</span>}
-                  </span>
-                  <span aria-hidden>↗</span>
-                  <span className="sr-only">(opens in a new tab)</span>
-                </a>
-              </li>
-            ))}
-          </ul>
+          <div className="mt-4 space-y-2">
+            {(() => {
+              const { saved, search } = tiktokLinks(selected);
+              const linkClass = "flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm";
+              if (saved.length === 0) {
+                return (
+                  <a href={search.url} target="_blank" rel="noopener noreferrer" className={`${linkClass} bg-accent font-semibold text-accent-ink`}>
+                    <span>
+                      TikTok<span className="font-normal opacity-80"> · {search.title}</span>
+                    </span>
+                    <span aria-hidden>↗</span>
+                    <span className="sr-only">(opens in a new tab)</span>
+                  </a>
+                );
+              }
+              return (
+                <details key={selected.id} className="group rounded-[1.375rem] bg-accent text-accent-ink">
+                  <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+                    <span>
+                      TikTok
+                      <span className="font-normal opacity-80">
+                        {" "}
+                        · {saved.length} {saved.length === 1 ? "link" : "links"}
+                      </span>
+                    </span>
+                    <span aria-hidden className="transition-transform group-open:rotate-180">
+                      ▾
+                    </span>
+                  </summary>
+                  <ul className="space-y-1 px-2 pb-2">
+                    {[...saved, search].map((l) => (
+                      <li key={l.url}>
+                        <a
+                          href={l.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className={`${linkClass} bg-white/15 hover:bg-white/25`}
+                        >
+                          <span className="line-clamp-2">{l.title ?? l.url}</span>
+                          <span aria-hidden>↗</span>
+                          <span className="sr-only">(opens in a new tab)</span>
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              );
+            })()}
+            <ul className="space-y-2">
+              {otherLinks(selected).map((l) => (
+                <li key={l.url}>
+                  <a
+                    href={l.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex min-h-11 items-center justify-between gap-3 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
+                  >
+                    <span>
+                      {PLATFORM_LABEL[l.platform]}
+                      {l.title && <span className="font-normal text-muted"> · {l.title}</span>}
+                    </span>
+                    <span aria-hidden>↗</span>
+                    <span className="sr-only">(opens in a new tab)</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
           {selected.userAdded && (
             <div className="mt-4 flex gap-2 text-sm">
               <button type="button" onClick={() => copyMarkdown(selected)} className="min-h-11 rounded-pill bg-tag px-4 py-2 font-semibold">

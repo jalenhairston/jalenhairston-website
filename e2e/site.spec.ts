@@ -226,7 +226,7 @@ test.describe("site-wide (US7, US8, US9, NFRs)", () => {
 });
 
 test.describe("things-to-do map (POC)", () => {
-  test("selecting a pin opens a sheet with TikTok-first, new-tab links, no horizontal scroll at 375x812", async ({ page }) => {
+  test("selecting a pin opens a sheet with a TikTok dropdown and new-tab links, no horizontal scroll at 375x812", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
     // Stub the third-party basemap style so the test is deterministic and offline-safe.
     await page.route("https://tiles.openfreemap.org/**", (route) =>
@@ -247,16 +247,26 @@ test.describe("things-to-do map (POC)", () => {
       await page.locator('button[aria-label="Neptune Oyster, Boston"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
-    // TikTok search is listed first and opens in a new tab.
-    const search = sheet.getByRole("link", { name: /^TikTok/ }).first();
-    await expect(search).toHaveText(/TikTok/);
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Neptune%20Oyster%20Boston");
-    await expect(search).toHaveAttribute("target", "_blank");
-    await expect(search).toHaveAttribute("rel", "noopener noreferrer");
+    // TikTok is a collapsed dropdown of real videos; the links are hidden until it is opened.
+    const dropdown = sheet.locator("details");
+    await expect(dropdown).not.toHaveAttribute("open", "");
+    await expect(sheet.getByRole("link", { name: /lord_cappuccino/ })).toHaveCount(0);
+    await dropdown.locator("summary").click();
+    const videos = dropdown.getByRole("link");
+    await expect(videos).toHaveCount(4); // 3 saved TikToks + the search fallback
+    const first = videos.first();
+    await expect(first).toHaveAttribute("href", /^https:\/\/www\.tiktok\.com\/@[\w.]+\/video\/\d+$/);
+    await expect(first).toHaveAttribute("target", "_blank");
+    await expect(first).toHaveAttribute("rel", "noopener noreferrer");
+    await expect(videos.last()).toHaveAttribute("href", "https://www.tiktok.com/search?q=Neptune%20Oyster%20Boston");
     // Instagram hashtag search sits after the TikTok links, also in a new tab.
     const insta = sheet.getByRole("link", { name: /^Instagram/ }).first();
     await expect(insta).toHaveAttribute("href", "https://www.instagram.com/explore/tags/neptuneoyster/");
     await expect(insta).toHaveAttribute("target", "_blank");
+    // Google search closes out the list.
+    const google = sheet.getByRole("link", { name: /^Google/ });
+    await expect(google).toHaveAttribute("href", "https://www.google.com/search?q=Neptune%20Oyster%20Boston");
+    await expect(google).toHaveAttribute("target", "_blank");
     expect(await hasHorizontalScroll(page)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
@@ -279,15 +289,27 @@ test.describe("things-to-do map (POC)", () => {
     expect(await pins.count()).toBeGreaterThan(0);
   });
 
-  test("expanded card shows more photos with credits, then Instagram last", async ({ page }) => {
+  test("expanded card shows more photos without reference links, then Google last", async ({ page }) => {
     await page.goto("/map");
     // The hidden place list selects a place without needing its pin on screen.
     await page.getByRole("button", { name: /^Ponce City Market, Atlanta/ }).dispatchEvent("click");
     const sheet = page.getByRole("region", { name: "Ponce City Market" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(3);
-    await expect(sheet.getByRole("link", { name: /Wikimedia Commons/ }).first()).toHaveAttribute("target", "_blank");
-    await expect(sheet.getByRole("link").last()).toHaveText(/Instagram/);
+    // No image-reference links under the photos; the post links end with Google.
+    await expect(sheet.getByRole("link", { name: /Wikimedia Commons/ })).toHaveCount(0);
+    await expect(sheet.getByRole("link").last()).toHaveText(/Google/);
+  });
+
+  test("places with no saved TikToks show a TikTok search link instead of a dropdown", async ({ page }) => {
+    await page.goto("/map");
+    await page.getByRole("button", { name: /^Tony & Elaine's, Boston/ }).dispatchEvent("click");
+    const sheet = page.getByRole("region", { name: "Tony & Elaine's" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator("details")).toHaveCount(0);
+    const search = sheet.getByRole("link", { name: /^TikTok/ });
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Tony%20%26%20Elaine's%20Boston");
+    await expect(search).toHaveAttribute("target", "_blank");
   });
 
   test("pins show a photo thumbnail and the place name before selecting", async ({ page }) => {
