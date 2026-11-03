@@ -235,17 +235,17 @@ test.describe("things-to-do map (POC)", () => {
       }),
     );
     await page.goto("/map");
-    const sheet = page.getByRole("region", { name: "Borough Market" });
+    const sheet = page.getByRole("region", { name: "Ponce City Market" });
     // Markers are created after the map module loads (and rebuilt on state changes), so retry the click.
     await expect(async () => {
-      await page.locator('button[aria-label="Borough Market, London"]').click({ force: true, timeout: 1000 });
+      await page.locator('button[aria-label="Ponce City Market, Atlanta"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
     // TikTok search is listed first and opens in a new tab.
     const links = sheet.getByRole("list").last().getByRole("link");
     const search = links.first();
     await expect(search).toHaveText(/TikTok/);
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Borough%20Market%20London");
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Ponce%20City%20Market%20Atlanta");
     await expect(search).toHaveAttribute("target", "_blank");
     await expect(search).toHaveAttribute("rel", "noopener noreferrer");
     await expect(links.last()).toHaveText(/Instagram/);
