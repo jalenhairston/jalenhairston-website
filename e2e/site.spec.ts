@@ -235,16 +235,16 @@ test.describe("things-to-do map (POC)", () => {
       }),
     );
     await page.goto("/map");
-    const sheet = page.getByRole("region", { name: "Museum of Fine Arts" });
+    const sheet = page.getByRole("region", { name: "BU Merch Store" });
     // Markers are created after the map module loads (and rebuilt on state changes), so retry the click.
     await expect(async () => {
-      await page.locator('button[aria-label="Museum of Fine Arts, Boston"]').click({ force: true, timeout: 1000 });
+      await page.locator('button[aria-label="BU Merch Store, Boston"]').click({ force: true, timeout: 1000 });
       await expect(sheet).toBeVisible({ timeout: 1000 });
     }).toPass({ timeout: 15_000 });
     // TikTok search is listed first and opens in a new tab.
     const search = sheet.getByRole("link").first();
     await expect(search).toHaveText(/TikTok/);
-    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Museum%20of%20Fine%20Arts%20Boston");
+    await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=BU%20Merch%20Store%20Boston");
     await expect(search).toHaveAttribute("target", "_blank");
     await expect(search).toHaveAttribute("rel", "noopener noreferrer");
     expect(await hasHorizontalScroll(page)).toBe(false);
