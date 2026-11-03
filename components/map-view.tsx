@@ -50,11 +50,20 @@ function platformOf(url: string): PostLink["platform"] | undefined {
 
 const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
 
-/** TikTok first (search link, then saved TikToks), then Instagram. */
+/** Instagram has no stable logged-out text search URL, so search the place's hashtag (e.g. #neptuneoyster). */
+const instagramTag = (p: MapPlace) => p.name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, "");
+const instagramSearchUrl = (p: MapPlace) => `https://www.instagram.com/explore/tags/${instagramTag(p)}/`;
+
+/** TikTok first (search, then saved TikToks), then Instagram (search, then saved posts). */
 function orderedLinks(p: MapPlace): (PostLink & { title?: string })[] {
   const saved = p.links.filter((l) => l.platform === "tiktok");
   const ig = p.links.filter((l) => l.platform === "instagram");
-  return [{ platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` }, ...saved, ...ig];
+  return [
+    { platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` },
+    ...saved,
+    { platform: "instagram", url: instagramSearchUrl(p), title: `Search #${instagramTag(p)}` },
+    ...ig,
+  ];
 }
 
 function loadUserPlaces(): MapPlace[] {

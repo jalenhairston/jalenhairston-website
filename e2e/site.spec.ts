@@ -253,6 +253,10 @@ test.describe("things-to-do map (POC)", () => {
     await expect(search).toHaveAttribute("href", "https://www.tiktok.com/search?q=Neptune%20Oyster%20Boston");
     await expect(search).toHaveAttribute("target", "_blank");
     await expect(search).toHaveAttribute("rel", "noopener noreferrer");
+    // Instagram hashtag search sits after the TikTok links, also in a new tab.
+    const insta = sheet.getByRole("link", { name: /^Instagram/ }).first();
+    await expect(insta).toHaveAttribute("href", "https://www.instagram.com/explore/tags/neptuneoyster/");
+    await expect(insta).toHaveAttribute("target", "_blank");
     expect(await hasHorizontalScroll(page)).toBe(false);
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
