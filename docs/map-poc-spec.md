@@ -66,3 +66,34 @@ Measured on 31 Boston places with known coordinates (hit = a result within 300m)
 The 5 misses (Broken Cup, BU Campus Store, Lola 42, Tony & Elaine's, Zaku Izakaya) are places OpenStreetMap lacks or lists under another name; free OSM-based search will not find them. Real searches are likely worse than 70% because this test set came largely from OSM.
 
 **Optional: Google Places (recommended for real coverage).** Set `NEXT_PUBLIC_GOOGLE_PLACES_KEY` (Vercel -> Project -> Settings -> Environment Variables, then redeploy). Create the key in Google Cloud: enable "Places API (New)", create an API key, restrict it to HTTP referrers (`*.vercel.app/*` plus your domain) and to the Places API, and set a daily quota/budget alert. When present it is tried first (Text Search with a 50km location bias); if it fails or finds nothing, search falls back to OpenStreetMap. The Google integration is written to the documented API shape and unit-tested with a fixture, but has not been exercised against the live API.
+
+## Places database (Neon Postgres)
+
+Places live in a `"Place"` table (`db/migrations/0001_create_place.sql`):
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | text, primary key | uuid for new places; seeded places keep their old slug |
+| `name` | text | required, ≤120 chars |
+| `address` | text, nullable | filled in from search results |
+| `description` | text | ≤1000 chars |
+| `social` | jsonb object | platform → array of links, e.g. `{"tiktok": ["https://www.tiktok.com/@u/video/1"], "instagram": ["…", "…"]}`. A platform with several links is shown as a dropdown. |
+| `latitude`, `longitude` | double precision | needed to put the pin on the map |
+| `city`, `category`, `photos` (jsonb array) | | used by the card and pins |
+| `created_at`, `updated_at` | timestamptz | |
+
+**Reads.** `/map` must stay fully static (root layout `ensureStatic = "navigation"`), so `lib/places-data.ts` reads the table inside `'use cache'` with `cacheTag("places")`, prerendered at build. **Writes** are server actions (`app/map/actions.ts`) that call `updateTag("places")`, so the next page load re-renders with fresh data.
+
+**Edit code.** Server actions are public POST endpoints, so every write checks `PLACES_EDIT_CODE` (constant-time compare). The UI asks for it once per device and remembers it in local storage; a wrong code is forgotten. Without `PLACES_EDIT_CODE` set, writes are refused.
+
+**Migrations + seed.** `npm run db:migrate` applies `db/migrations/*.sql` once each (tracked in `_migrations`) and seeds the real (non-sample) places from `content/places` exactly once ever, so deleting places is never undone by a later deploy. Vercel runs it automatically via the `vercel-build` script before `next build`. It skips when there is no database URL.
+
+**Without a database** (local dev, e2e tests) an in-memory store seeded from `content/places` is used; changes vanish on restart and the add form says "Demo mode".
+
+**Legacy device-only places** (saved in local storage before this) show a "Move to shared map" banner that uploads them with the edit code.
+
+**Vercel environment variables**
+- `DATABASE_URL`: set by the Neon integration (per preview branch when branching is on). `POSTGRES_URL` is accepted as a fallback.
+- `PLACES_EDIT_CODE`: choose a passphrase; share it only with people who should edit. Server-only (no `NEXT_PUBLIC_` prefix).
+
+**Tests.** `lib/places-store.test.ts` runs the real migration and queries against PGlite (Postgres in WASM): CRUD, JSONB round-trips, table constraints, seed-once. e2e runs against the in-memory store with `PLACES_EDIT_CODE=e2e-edit-code` (see `playwright.config.ts`).

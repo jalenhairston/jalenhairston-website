@@ -20,12 +20,30 @@ const OUT_DIR = path.join(ROOT, "public/social");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 const force = process.argv.includes("--force");
 
-type Item = { thumb?: string; author?: string; durationSec?: number; status: "ok" | "unavailable"; fetchedAt: string };
+type Item = { thumb?: string; label?: string; author?: string; durationSec?: number; status: "ok" | "unavailable"; fetchedAt: string };
+
+/** "@author · first words of the caption…" for the dropdown row. */
+function labelFor(author: string, desc: string): string {
+  let t = desc.replace(/[#@]\S+/g, "").replace(/\s+/g, " ").trim().replace(/^[-–—:|·\s]+|[-–—:|·\s]+$/g, "");
+  if (t.length > 56) t = t.slice(0, 56).replace(/\s+\S*$/, "").replace(/[,.;:!-]+$/, "") + "…";
+  return t ? `@${author} · ${t}` : `Video by @${author}`;
+}
 const manifest: { version: 1; items: Record<string, Item> } = fs.existsSync(MANIFEST)
   ? JSON.parse(fs.readFileSync(MANIFEST, "utf8"))
   : { version: 1, items: {} };
 
 const ids = new Map<string, string>(); // id -> url
+// Links from the database (when configured) and from content/places (seed data).
+async function addDatabaseLinks() {
+  const url = process.env.DATABASE_URL || process.env.POSTGRES_URL;
+  if (!url) return;
+  const { neon } = await import("@neondatabase/serverless");
+  const rows = (await neon(url).query(`SELECT social FROM "Place"`)) as { social: Record<string, string[]> }[];
+  for (const r of rows) for (const u of r.social?.tiktok ?? []) {
+    const t = parseTikTok(u);
+    if (t) ids.set(t.id, u);
+  }
+}
 for (const f of fs.readdirSync(PLACES).filter((f) => f.endsWith(".md"))) {
   const { data } = matter(fs.readFileSync(path.join(PLACES, f), "utf8"));
   for (const l of (data.links ?? []) as { platform: string; url: string }[]) {
@@ -36,6 +54,7 @@ for (const f of fs.readdirSync(PLACES).filter((f) => f.endsWith(".md"))) {
 
 fs.mkdirSync(OUT_DIR, { recursive: true });
 async function main() {
+  await addDatabaseLinks();
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   let fetched = 0;
   const unavailable: string[] = [];
@@ -63,7 +82,7 @@ async function main() {
         fs.writeFileSync(path.join(OUT_DIR, name), jpg);
         thumb = `/social/${name}`;
       }
-      manifest.items[id] = { thumb, author: item.author?.uniqueId, durationSec: item.video?.duration, status: "ok", fetchedAt: new Date().toISOString() };
+      manifest.items[id] = { thumb, label: labelFor(item.author?.uniqueId ?? "", item.desc ?? ""), author: item.author?.uniqueId, durationSec: item.video?.duration, status: "ok", fetchedAt: new Date().toISOString() };
       fetched++;
     } catch (e) {
       console.warn(`! ${id}: ${(e as Error).message}`);

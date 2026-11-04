@@ -13,9 +13,12 @@
     "content:check": "tsx scripts/check-content.ts",
     "test": "vitest run",
     "test:e2e": "playwright test",
-    "social:refresh": "tsx scripts/refresh-social.ts"
+    "social:refresh": "tsx scripts/refresh-social.ts",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "vercel-build": "npm run db:migrate && npm run build"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.2.0",
     "@vercel/analytics": "^2.0.1",
     "gray-matter": "^4.0.3",
     "maplibre-gl": "^6.16.0",
@@ -25,11 +28,13 @@
     "rehype-stringify": "^10.0.1",
     "remark": "^15.0.1",
     "remark-rehype": "^11.1.2",
+    "server-only": "^0.0.1",
     "supercluster": "^9.1.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.13.0",
+    "@electric-sql/pglite": "^0.5.15",
     "@playwright/test": "^1.63.0",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^22.20.5",

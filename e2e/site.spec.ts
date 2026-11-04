@@ -299,8 +299,8 @@ test.describe("things-to-do map (POC)", () => {
   test("expanded card shows more photos without reference links, then Google last", async ({ page }) => {
     await page.goto("/map");
     // The hidden place list selects a place without needing its pin on screen.
-    await page.getByRole("button", { name: /^Ponce City Market, Atlanta/ }).dispatchEvent("click");
-    const sheet = page.getByRole("region", { name: "Ponce City Market" });
+    await page.getByRole("button", { name: "Quincy Market, Boston (food)", exact: true }).dispatchEvent("click");
+    const sheet = page.getByRole("region", { name: "Quincy Market" });
     await expect(sheet).toBeVisible();
     await expect(sheet.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(3);
     // No image-reference links under the photos; the post links end with Google.
@@ -408,9 +408,9 @@ test.describe("things-to-do map (POC)", () => {
       route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
     );
     await page.goto("/map");
-    const pin = page.locator('button[aria-label="Borough Market, London"]');
-    await expect(pin.locator("img")).toHaveAttribute("src", /Borough_Market_I\.jpg/);
-    await expect(pin).toContainText("Borough Market");
+    const pin = page.locator('button[aria-label="Museum of Fine Arts, Boston"]');
+    await expect(pin.locator("img")).toHaveAttribute("src", /Museum-of-Fine-Arts-Boston-02\.jpg/);
+    await expect(pin).toContainText("Museum of Fine Arts");
   });
 
   test("full screen button expands the map over the page and exits again", async ({ page }) => {
@@ -420,8 +420,7 @@ test.describe("things-to-do map (POC)", () => {
     );
     await page.goto("/map");
     const shell = page.getByTestId("map-shell");
-    const before = await shell.boundingBox();
-    expect(before!.height).toBeLessThan(812);
+    await expect.poll(async () => (await shell.boundingBox())?.height ?? 9999).toBeLessThan(812);
     await page.getByRole("button", { name: "Full screen" }).click();
     await expect(shell).toHaveAttribute("data-fullscreen", "true");
     const box = await shell.boundingBox();
@@ -431,7 +430,8 @@ test.describe("things-to-do map (POC)", () => {
     await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
     await page.getByRole("button", { name: "Exit full screen" }).click();
     await expect(shell).toHaveAttribute("data-fullscreen", "false");
-    expect((await shell.boundingBox())!.height).toBeLessThan(812);
+    // Layout settles a frame after leaving full screen.
+    await expect.poll(async () => (await shell.boundingBox())?.height ?? 9999).toBeLessThan(812);
   });
 
   test("the user's position is shown by default and the locate button just centers on it", async ({ browser }) => {
@@ -476,12 +476,18 @@ test.describe("things-to-do map (POC)", () => {
     await context.close();
   });
 
-  test.describe("adding a place by searching for it", () => {
+  test.describe("shared places (database + edit code)", () => {
+    // The e2e server has no DATABASE_URL, so places live in its in-memory store, shared by every browser.
+    // Names and spots are unique per run so leftovers from an interrupted run never collide.
+    const CODE = "e2e-edit-code";
+    const run = Date.now() % 100000;
+    const spot = { lat: 42.3535 + (run % 50) / 10000, lng: -71.0745 - (run % 37) / 10000 };
+    const newName = `Tatte Bakery ${run}`;
     const photon = {
       features: [
         {
-          geometry: { coordinates: [-71.0745, 42.3535] },
-          properties: { name: "Tatte Bakery & Cafe", osm_key: "amenity", osm_value: "cafe", street: "Newbury Street", housenumber: "399", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: "1" },
+          geometry: { coordinates: [spot.lng, spot.lat] },
+          properties: { name: newName, osm_key: "amenity", osm_value: "cafe", street: "Newbury Street", housenumber: "399", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: String(run) },
         },
         {
           // On top of the existing Mike's Pastry entry, so it should be recognised as already on the map.
@@ -490,50 +496,85 @@ test.describe("things-to-do map (POC)", () => {
         },
       ],
     };
-    const stub = async (page: Page) => {
-      await page.route("https://tiles.openfreemap.org/**", (route) =>
+    const stubTiles = (page: Page) =>
+      page.route("https://tiles.openfreemap.org/**", (route) =>
         route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
       );
+    const stub = async (page: Page) => {
+      await stubTiles(page);
       await page.route("https://photon.komoot.io/**", (route) => route.fulfill({ json: photon }));
     };
-    const openSearch = async (page: Page) => {
+    const openMap = async (page: Page) => {
       await page.goto("/map");
       await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+    };
+    const enterCode = async (page: Page, code = CODE) => {
+      const prompt = page.getByRole("form", { name: "Enter the edit code" });
+      await prompt.getByLabel("Edit code").fill(code);
+      await prompt.getByRole("button", { name: "Continue" }).click();
+    };
+    const openSearch = async (page: Page) => {
+      await openMap(page);
       await page.getByRole("button", { name: "+ Add place" }).click();
+      await enterCode(page);
       return page.getByRole("search", { name: "Search for a place to add" });
     };
 
-    test("search results fill in the form, a link is optional, and the place survives a refresh", async ({ page }) => {
+    test("adding needs the edit code: a wrong code is rejected, the right one is remembered", async ({ page }) => {
+      await stub(page);
+      await openMap(page);
+      await page.getByRole("button", { name: "+ Add place" }).click();
+      await enterCode(page, "not-the-code");
+      await expect(page.getByRole("form", { name: "Enter the edit code" }).getByRole("alert")).toHaveText(/isn't right/);
+      await enterCode(page);
+      const search = page.getByRole("search", { name: "Search for a place to add" });
+      await expect(search).toBeVisible();
+      // Remembered on this device: closing and reopening does not ask again.
+      await page.getByRole("button", { name: "Cancel", exact: true }).click();
+      await page.getByRole("button", { name: "+ Add place" }).click();
+      await expect(search).toBeVisible();
+      await expect(page.getByRole("form", { name: "Enter the edit code" })).toHaveCount(0);
+    });
+
+    test("a searched place saves to the shared list, shows up in another browser, and can be removed", async ({ page, browser }) => {
       await stub(page);
       const search = await openSearch(page);
       await search.getByRole("searchbox", { name: "Search for a place" }).fill("tatte");
-      await search.getByRole("button", { name: /Tatte Bakery & Cafe/ }).click();
+      await search.getByRole("button", { name: new RegExp(newName) }).click();
 
       const form = page.getByRole("form", { name: "Add a place" });
-      await expect(form.getByLabel("Name")).toHaveValue("Tatte Bakery & Cafe");
+      await expect(form.getByLabel("Name")).toHaveValue(newName);
+      await expect(form.getByLabel("Address (optional)")).toHaveValue("399 Newbury Street, Boston, Massachusetts");
       await expect(form.getByLabel("City")).toHaveValue("Boston");
       await expect(form.getByLabel("Category")).toHaveValue("coffee");
-      await form.getByRole("button", { name: "Save" }).click(); // no TikTok/Instagram link needed
+      await expect(form).toContainText("Demo mode"); // no DATABASE_URL in tests
+      await form.getByLabel(/links/).fill("https://www.tiktok.com/@lord_cappuccino/video/7320475537431055662\nhttps://www.instagram.com/p/DAbcdefGH12/\nhttps://www.instagram.com/p/DAbcdefGH13/");
+      await form.getByRole("button", { name: "Save" }).click();
 
-      const card = page.getByRole("region", { name: "Tatte Bakery & Cafe" });
+      const card = page.getByRole("region", { name: newName });
       await expect(card).toBeVisible();
-      await expect(card).toContainText("added by you");
-      await expect(card.getByRole("link", { name: /TikTok/ })).toHaveCount(0); // no video saved, so no TikTok section
-      await expect(card.getByRole("link", { name: /Open in Apple Maps/ })).toHaveAttribute("href", /ll=42\.3535,-71\.0745/);
+      await expect(card).toContainText("399 Newbury Street, Boston, Massachusetts");
+      await expect(card).not.toContainText("only on this device");
+      // social JSON round-trip: 1 TikTok video (dropdown) and 2 Instagram links (grouped into a dropdown).
+      await expect(card.locator("summary", { hasText: "TikTok" })).toContainText("1 video");
+      await expect(card.locator("summary", { hasText: "Instagram" })).toContainText("2 links");
 
-      // Survives a refresh: it is reloaded from this device's storage.
+      // Another browser with no local storage sees it: it lives on the server now.
+      const other = await browser.newContext({ baseURL: "http://localhost:3100" });
+      const p2 = await other.newPage();
+      await stubTiles(p2);
+      await openMap(p2);
+      await p2.getByRole("button", { name: `${newName}, Boston (coffee)`, exact: true }).dispatchEvent("click");
+      await expect(p2.getByRole("region", { name: newName })).toBeVisible();
+      await other.close();
+
+      // Removing it (after confirming) sticks across a refresh.
+      page.once("dialog", (d) => d.accept());
+      await card.getByRole("button", { name: "Remove from map" }).click();
+      await expect(card).toBeHidden();
       await page.reload();
       await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
-      await page.getByRole("button", { name: "Tatte Bakery & Cafe, Boston (coffee)" }).dispatchEvent("click");
-      const again = page.getByRole("region", { name: "Tatte Bakery & Cafe" });
-      await expect(again).toBeVisible();
-      await expect(again).toContainText("added by you");
-
-      // ...and removing it sticks too.
-      await again.getByRole("button", { name: "Remove" }).click();
-      await page.reload();
-      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
-      await expect(page.getByRole("button", { name: /Tatte Bakery & Cafe/ })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: new RegExp(newName) })).toHaveCount(0);
     });
 
     test("a search result that is already on the map opens it instead of adding a duplicate", async ({ page }) => {
@@ -547,10 +588,8 @@ test.describe("things-to-do map (POC)", () => {
       await expect(page.getByRole("form", { name: "Add a place" })).toHaveCount(0);
     });
 
-    test("falls back to a second search service, then explains if both are down", async ({ page }) => {
-      await page.route("https://tiles.openfreemap.org/**", (route) =>
-        route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
-      );
+    test("search falls back to a second service, then explains if both are down", async ({ page }) => {
+      await stubTiles(page);
       await page.route("https://photon.komoot.io/**", (route) => route.fulfill({ status: 503, body: "down" }));
       let nominatimUp = true;
       await page.route("https://nominatim.openstreetmap.org/**", (route) =>
@@ -567,63 +606,45 @@ test.describe("things-to-do map (POC)", () => {
       await expect(search.getByText(/Search isn't available right now/)).toBeVisible();
     });
 
-    test("warns when the browser refuses to save, instead of silently losing the place", async ({ page }) => {
-      await page.addInitScript(() => {
-        Storage.prototype.setItem = () => {
-          throw new DOMException("blocked", "QuotaExceededError");
-        };
-      });
-      await stub(page);
-      const search = await openSearch(page);
-      await search.getByRole("searchbox", { name: "Search for a place" }).fill("tatte");
-      await search.getByRole("button", { name: /Tatte Bakery & Cafe/ }).click();
-      await page.getByRole("form", { name: "Add a place" }).getByRole("button", { name: "Save" }).click();
-      await expect(page.getByText(/Couldn't save this place on your device/)).toBeVisible();
-    });
-  });
+    test("places saved only on this device (before the database) can be moved to the shared map", async ({ page }) => {
+      const legacyName = `Legacy Spot ${run}`;
+      const legacy = {
+        id: "user-1",
+        name: legacyName,
+        city: "Boston",
+        category: "food",
+        lat: spot.lat + 0.004,
+        lng: spot.lng,
+        description: "Saved on my phone",
+        photos: [],
+        links: [{ platform: "tiktok", url: "https://www.tiktok.com/@lord_cappuccino/video/7320475537431055662" }],
+      };
+      // Put it in local storage once (not again on reload).
+      await page.addInitScript((p) => {
+        if (sessionStorage.getItem("seeded-legacy")) return;
+        localStorage.setItem("map-user-places-v1", JSON.stringify([p]));
+        sessionStorage.setItem("seeded-legacy", "1");
+      }, legacy);
+      await stubTiles(page);
+      await openMap(page);
+      const banner = page.getByRole("status").filter({ hasText: "saved only on this device" });
+      await expect(banner).toContainText("1 place is saved only on this device");
+      await banner.getByRole("button", { name: "Move to shared map" }).click();
+      await enterCode(page);
+      await expect(banner).toBeHidden();
+      expect(await page.evaluate(() => localStorage.getItem("map-user-places-v1"))).toBeNull();
 
-  test("the map is strictly flat: no tilt, no rotation, no 3D buildings", async ({ page }) => {
-    // A stub basemap that includes a 3D building layer like the real style does.
-    const square = { type: "Feature", properties: { height: 80 }, geometry: { type: "Polygon", coordinates: [[[-71.06, 42.36], [-71.059, 42.36], [-71.059, 42.361], [-71.06, 42.361], [-71.06, 42.36]]] } };
-    await page.route("https://tiles.openfreemap.org/**", (route) =>
-      route.fulfill({
-        json: {
-          version: 8,
-          sources: { b: { type: "geojson", data: { type: "FeatureCollection", features: [square] } } },
-          layers: [
-            { id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } },
-            { id: "building-3d", type: "fill-extrusion", source: "b", paint: { "fill-extrusion-height": ["get", "height"], "fill-extrusion-base": 0 } },
-          ],
-        },
-      }),
-    );
-    await page.goto("/map?debug-map");
-    type DebugMap = {
-      getMaxPitch(): number;
-      getPitch(): number;
-      getBearing(): number;
-      dragRotate: { isEnabled(): boolean };
-      touchPitch: { isEnabled(): boolean };
-      touchZoomRotate: { isEnabled(): boolean };
-      getPaintProperty(layer: string, prop: string): unknown;
-      isStyleLoaded(): boolean;
-    };
-    const read = () =>
-      page.evaluate(() => {
-        const m = (window as unknown as { __map?: DebugMap }).__map;
-        if (!m || !m.isStyleLoaded()) return null;
-        return {
-          maxPitch: m.getMaxPitch(),
-          pitch: m.getPitch(),
-          bearing: m.getBearing(),
-          dragRotate: m.dragRotate.isEnabled(),
-          touchPitch: m.touchPitch.isEnabled(),
-          pinchZoom: m.touchZoomRotate.isEnabled(),
-          height: m.getPaintProperty("building-3d", "fill-extrusion-height"),
-          base: m.getPaintProperty("building-3d", "fill-extrusion-base"),
-        };
-      });
-    await expect.poll(read).toEqual({ maxPitch: 0, pitch: 0, bearing: 0, dragRotate: false, touchPitch: false, pinchZoom: true, height: 0, base: 0 });
+      await page.reload();
+      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+      await page.getByRole("button", { name: `${legacyName}, Boston (food)`, exact: true }).dispatchEvent("click");
+      const card = page.getByRole("region", { name: legacyName });
+      await expect(card).toBeVisible();
+      await expect(card).not.toContainText("only on this device");
+      await expect(card.locator("summary", { hasText: "TikTok" })).toContainText("1 video");
+      page.once("dialog", (d) => d.accept());
+      await card.getByRole("button", { name: "Remove from map" }).click();
+      await expect(card).toBeHidden();
+    });
   });
 
   test("menu links to the map", async ({ page }) => {

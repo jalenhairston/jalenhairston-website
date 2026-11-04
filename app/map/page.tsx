@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
-import { MapView, type MapPlace } from "@/components/map-view";
+import { MapView } from "@/components/map-view";
 import { getContent } from "@/lib/content";
+import { getMapPlaces } from "@/lib/places-data";
 
 export function generateMetadata(): Metadata {
   const { name } = getContent().profile;
@@ -8,24 +9,13 @@ export function generateMetadata(): Metadata {
   return { title: "Map", description, openGraph: { title: `Map · ${name}`, description } };
 }
 
-export default function MapPage() {
-  const places: MapPlace[] = getContent().places.map((p) => ({
-    id: p.slug,
-    name: p.name,
-    city: p.city,
-    category: p.category,
-    lat: p.lat,
-    lng: p.lng,
-    description: p.body,
-    photos: p.photos,
-    links: p.links,
-    userAdded: false,
-  }));
-
+export default async function MapPage() {
+  // Places come from the database (Neon) when DATABASE_URL is set; see lib/places-db.ts.
+  const { places, storage } = await getMapPlaces();
   return (
     <div className="pt-2">
       <h1 className="sr-only">Things to do map</h1>
-      <MapView places={places} />
+      <MapView places={places} storage={storage} />
     </div>
   );
 }

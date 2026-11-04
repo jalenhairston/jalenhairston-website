@@ -8,25 +8,17 @@ import Supercluster from "supercluster";
 import { canWarm, embedFor } from "@/lib/social";
 import { distanceMeters, findExisting, searchPlaces, type PlaceResult } from "@/lib/geocode";
 import { useEffect, useRef, useState } from "react";
+import { checkEditCode, createPlace, deletePlace, importPlaces } from "@/app/map/actions";
+import { socialFromLinks, type MapLink, type MapPlace, type PlaceInput } from "@/lib/places-model";
 
-export type PostLink = { platform: "tiktok" | "instagram"; url: string; title?: string; thumb?: string };
-export type DraftPoint = { lat: number; lng: number; name?: string; city?: string; category?: string };
-export type Photo = { src: string; alt: string; credit?: string; creditUrl?: string };
-export type MapPlace = {
-  id: string;
-  name: string;
-  city: string;
-  category: string;
-  lat: number;
-  lng: number;
-  description: string;
-  photos: Photo[];
-  links: PostLink[];
-  userAdded: boolean;
-};
+export type { MapPlace, MapLink as PostLink, Photo } from "@/lib/places-model";
+export type DraftPoint = { lat: number; lng: number; name?: string; address?: string; city?: string; category?: string };
 
 const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+/** Legacy: places saved only in this browser before the shared database existed. */
 const STORAGE_KEY = "map-user-places-v1";
+/** The edit code is remembered on the device so it is asked for once. */
+const CODE_KEY = "map-edit-code";
 const CATEGORIES = ["food", "drinks", "coffee", "outdoors", "culture", "nightlife", "shopping", "other"] as const;
 const CATEGORY_EMOJI: Record<string, string> = {
   food: "🍽️",
@@ -40,16 +32,30 @@ const CATEGORY_EMOJI: Record<string, string> = {
 };
 /** Pins cluster up to this zoom; selecting a place flies one level past it so it always shows alone. */
 const CLUSTER_MAX_ZOOM = 14;
-const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram", google: "Google" } as const;
-type ShownLink = { platform: keyof typeof PLATFORM_LABEL; url: string; title?: string; thumb?: string };
-
-function platformOf(url: string): PostLink["platform"] | undefined {
+const PLATFORM_LABEL: Record<string, string> = { tiktok: "TikTok", instagram: "Instagram", google: "Google", youtube: "YouTube", web: "Link" };
+const platformLabel = (p: string) => PLATFORM_LABEL[p] ?? p.charAt(0).toUpperCase() + p.slice(1);
+type ShownLink = MapLink;
+const hostOf = (url: string) => {
   try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    if (host === "tiktok.com" || host.endsWith(".tiktok.com")) return "tiktok";
-    if (host === "instagram.com" || host.endsWith(".instagram.com")) return "instagram";
-  } catch {}
-  return undefined;
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+};
+
+/** Map place -> input for the server (used when moving legacy device-only places into the database). */
+function toInput(p: MapPlace): Omit<PlaceInput, "id"> {
+  return {
+    name: p.name,
+    address: p.address ?? null,
+    description: p.description,
+    social: socialFromLinks(p.links.map((l) => l.url)),
+    latitude: p.lat,
+    longitude: p.lng,
+    city: p.city,
+    category: (CATEGORIES as readonly string[]).includes(p.category) ? (p.category as PlaceInput["category"]) : "other",
+    photos: p.photos.filter((x) => x.src.startsWith("https://")),
+  };
 }
 
 const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
@@ -71,14 +77,6 @@ function tiktokLinks(p: MapPlace): { saved: ShownLink[]; search: ShownLink } {
   };
 }
 
-/** Below the TikTok dropdown: Instagram (search, then saved posts), then Google. */
-function otherLinks(p: MapPlace): ShownLink[] {
-  return [
-    { platform: "instagram", url: instagramSearchUrl(p), title: `Search #${instagramTag(p)}` },
-    ...p.links.filter((l) => l.platform === "instagram"),
-    { platform: "google", url: googleSearchUrl(p), title: `Search “${p.name}”` },
-  ];
-}
 
 // --- Background warm-up -------------------------------------------------------------------------
 // When a place is broken out of a cluster we pre-fetch its (self-hosted, immutable) video thumbnails
@@ -143,20 +141,16 @@ function loadUserPlaces(): MapPlace[] {
     return Array.isArray(parsed)
       ? (parsed as MapPlace[])
           .filter((p) => typeof p?.lat === "number" && typeof p?.lng === "number")
-          .map((p) => ({ ...p, photos: Array.isArray(p.photos) ? p.photos : [], links: Array.isArray(p.links) ? p.links : [] }))
+          .map((p) => ({ ...p, userAdded: true, photos: Array.isArray(p.photos) ? p.photos : [], links: Array.isArray(p.links) ? p.links : [] }))
       : [];
   } catch {
     return [];
   }
 }
 
-function toMarkdown(p: MapPlace): string {
-  const links = p.links.map((l) => `  - { platform: ${l.platform}, url: "${l.url}" }`).join("\n");
-  const photos = p.photos.length ? `photos:\n${p.photos.map((x) => `  - { src: "${x.src}", alt: "${x.alt.replaceAll('"', '\\"')}" }`).join("\n")}\n` : "";
-  return `---\nsample: false\nname: "${p.name.replaceAll('"', '\\"')}"\ncity: "${p.city.replaceAll('"', '\\"')}"\ncategory: ${p.category}\nlat: ${p.lat.toFixed(5)}\nlng: ${p.lng.toFixed(5)}\n${photos}links:\n${links}\n---\n${p.description}\n`;
-}
 
-export function MapView({ places }: { places: MapPlace[] }) {
+export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]; storage: "database" | "memory" }) {
+  const [places, setPlaces] = useState<MapPlace[]>(initialPlaces);
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markersRef = useRef<Marker[]>([]);
@@ -167,7 +161,10 @@ export function MapView({ places }: { places: MapPlace[] }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [draftPoint, setDraftPoint] = useState<DraftPoint | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [editCode, setEditCode] = useState<string | null>(null);
+  const [askingCode, setAskingCode] = useState(false);
+  const codeWaiter = useRef<((code: string | null) => void) | null>(null);
+  const [moving, setMoving] = useState(false);
   const [zoom, setZoom] = useState(0);
   const [full, setFull] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
@@ -183,6 +180,10 @@ export function MapView({ places }: { places: MapPlace[] }) {
     const saved = loadUserPlaces();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (saved.length > 0) setUserPlaces(saved);
+    try {
+      const code = localStorage.getItem(CODE_KEY);
+      if (code) setEditCode(code);
+    } catch {}
   }, []);
 
   useEffect(() => {
@@ -502,42 +503,79 @@ export function MapView({ places }: { places: MapPlace[] }) {
     return () => cancelAnimationFrame(id);
   }, [full, mapReady]);
 
-  function savePlace(p: MapPlace) {
-    const next = [...userPlaces, p];
-    setUserPlaces(next);
-    let stored = true;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      stored = false;
-    }
-    if (stored) {
-      // Ask the browser not to evict our storage under pressure (best effort; Safari may still clear it after ~7 idle days).
-      try {
-        void navigator.storage?.persist?.();
-      } catch {}
-    } else {
-      setGeoError("Couldn't save this place on your device (private browsing?). It will be gone when you refresh.");
-    }
-    setDraftPoint(null);
-    setSelectedId(p.id);
+  /** The edit code, asking for it (once per device) if we don't have it yet. Null if the person cancels. */
+  function requestCode(): Promise<string | null> {
+    if (editCode) return Promise.resolve(editCode);
+    setAskingCode(true);
+    return new Promise((resolve) => {
+      codeWaiter.current = resolve;
+    });
   }
 
-  function removePlace(id: string) {
-    const next = userPlaces.filter((p) => p.id !== id);
-    setUserPlaces(next);
+  function forgetCode() {
+    setEditCode(null);
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      localStorage.removeItem(CODE_KEY);
     } catch {}
+  }
+
+  /** Save a new place to the shared list. Returns an error message, or null on success. */
+  async function savePlace(input: Omit<PlaceInput, "id">): Promise<string | null> {
+    const code = await requestCode();
+    if (!code) return "An edit code is needed to save.";
+    const res = await createPlace(code, input);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      return res.error;
+    }
+    setPlaces((ps) => [...ps, res.place]);
+    setDraftPoint(null);
+    setSelectedId(res.place.id);
+    return null;
+  }
+
+  async function removePlace(p: MapPlace) {
+    if (p.userAdded) {
+      const next = userPlaces.filter((x) => x.id !== p.id);
+      setUserPlaces(next);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      setSelectedId(null);
+      return;
+    }
+    if (!window.confirm(`Remove “${p.name}” from the map for everyone?`)) return;
+    const code = await requestCode();
+    if (!code) return;
+    const res = await deletePlace(code, p.id);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setGeoError(res.error);
+      return;
+    }
+    setPlaces((ps) => ps.filter((x) => x.id !== p.id));
     setSelectedId(null);
   }
 
-  async function copyMarkdown(p: MapPlace) {
+  /** Move places saved only in this browser (before the database) into the shared list. */
+  async function moveLocalPlaces() {
+    const code = await requestCode();
+    if (!code) return;
+    setMoving(true);
+    const res = await importPlaces(code, userPlaces.map(toInput));
+    setMoving(false);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setGeoError(res.error);
+      return;
+    }
+    setPlaces((ps) => [...ps, ...res.places]);
+    setUserPlaces([]);
+    setSelectedId(null);
     try {
-      await navigator.clipboard.writeText(toMarkdown(p));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      localStorage.removeItem(STORAGE_KEY);
     } catch {}
+    if (res.skipped) setGeoError(`${res.skipped} place(s) couldn't be moved because some details were invalid.`);
   }
 
   return (
@@ -585,10 +623,14 @@ export function MapView({ places }: { places: MapPlace[] }) {
       <div className="absolute top-3 left-3 z-10 flex gap-2" style={full ? { top: "max(0.75rem, env(safe-area-inset-top))" } : undefined}>
         <button
           type="button"
-          onClick={() => {
+          onClick={async () => {
+            if (adding) {
+              setAdding(false);
+              return;
+            }
             setSelectedId(null);
             setDraftPoint(null);
-            setAdding((a) => !a);
+            if (await requestCode()) setAdding(true);
           }}
           aria-pressed={adding}
           className="min-h-11 rounded-pill bg-accent px-4 py-2 text-sm font-semibold text-accent-ink shadow-soft"
@@ -623,7 +665,7 @@ export function MapView({ places }: { places: MapPlace[] }) {
           }}
           places={all}
           onPick={(r) => {
-            setDraftPoint({ lat: r.lat, lng: r.lng, name: r.name, city: r.city, category: r.category });
+            setDraftPoint({ lat: r.lat, lng: r.lng, name: r.name, address: r.detail, city: r.city, category: r.category });
             setAdding(false);
             const map = mapRef.current;
             // Keep the spot visible above the form sheet on phones.
@@ -647,8 +689,9 @@ export function MapView({ places }: { places: MapPlace[] }) {
               <h2 className="text-lg font-semibold leading-tight">{selected.name}</h2>
               <p className="mt-1 text-sm text-muted">
                 {selected.city} · <span className="capitalize">{selected.category}</span>
-                {selected.userAdded && " · added by you"}
+                {selected.userAdded && " · only on this device"}
               </p>
+              {selected.address && <p className="mt-0.5 text-sm text-muted">{selected.address}</p>}
             </div>
             <button
               type="button"
@@ -685,16 +728,11 @@ export function MapView({ places }: { places: MapPlace[] }) {
             <TikTokSection key={`tiktok-${selected.id}`} place={selected} />
             <OtherLinks key={`other-${selected.id}`} place={selected} />
           </div>
-          {selected.userAdded && (
-            <div className="mt-4 flex gap-2 text-sm">
-              <button type="button" onClick={() => copyMarkdown(selected)} className="min-h-11 rounded-pill bg-tag px-4 py-2 font-semibold">
-                {copied ? "Copied!" : "Copy as content file"}
-              </button>
-              <button type="button" onClick={() => removePlace(selected.id)} className="min-h-11 rounded-pill px-4 py-2 text-muted underline">
-                Remove
-              </button>
-            </div>
-          )}
+          <div className="mt-4 flex text-sm">
+            <button type="button" onClick={() => removePlace(selected)} className="min-h-11 rounded-pill px-2 py-2 text-muted underline">
+              Remove from map
+            </button>
+          </div>
         </section>
       )}
 
@@ -703,7 +741,35 @@ export function MapView({ places }: { places: MapPlace[] }) {
           point={draftPoint}
           defaultCity={nearestCity(draftPoint, all)}
           onCancel={() => setDraftPoint(null)}
-          onSave={(p) => savePlace(p)}
+          storage={storage}
+          onSave={savePlace}
+        />
+      )}
+
+      {userPlaces.length > 0 && !adding && !draftPoint && !selected && (
+        <div role="status" className="absolute inset-x-3 bottom-12 z-10 flex items-center justify-between gap-3 rounded-card bg-surface px-4 py-2 text-sm shadow-soft sm:right-auto sm:w-96">
+          <span>
+            {userPlaces.length} {userPlaces.length === 1 ? "place is" : "places are"} saved only on this device.
+          </span>
+          <button type="button" disabled={moving} onClick={moveLocalPlaces} className="min-h-11 shrink-0 rounded-pill bg-accent px-3 font-semibold text-accent-ink">
+            {moving ? "Moving…" : "Move to shared map"}
+          </button>
+        </div>
+      )}
+
+      {askingCode && (
+        <EditCodePrompt
+          onDone={(code) => {
+            setAskingCode(false);
+            if (code) {
+              setEditCode(code);
+              try {
+                localStorage.setItem(CODE_KEY, code);
+              } catch {}
+            }
+            codeWaiter.current?.(code);
+            codeWaiter.current = null;
+          }}
         />
       )}
     </div>
@@ -727,41 +793,51 @@ function nearestCity(point: { lat: number; lng: number }, places: MapPlace[]): s
 function AddPlaceForm({
   point,
   defaultCity,
+  storage,
   onSave,
   onCancel,
 }: {
   point: DraftPoint;
   defaultCity: string;
-  onSave: (p: MapPlace) => void;
+  storage: "database" | "memory";
+  onSave: (input: Omit<PlaceInput, "id">) => Promise<string | null>;
   onCancel: () => void;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const nameRef = useRef<HTMLInputElement>(null);
   // Picked from search: details are filled in already, so do not pop the keyboard.
   useEffect(() => {
     if (!point.name) nameRef.current?.focus();
   }, [point.name]);
 
-  function submit(e: React.FormEvent<HTMLFormElement>) {
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const f = new FormData(e.currentTarget);
-    const url = String(f.get("url") ?? "").trim();
-    const platform = url ? platformOf(url) : undefined;
-    if (url && !platform) return setError("That link must be a TikTok or Instagram URL (https://…), or leave it blank.");
+    const links = String(f.get("links") ?? "")
+      .split(/\s+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const bad = links.find((l) => !/^https:\/\/\S+\.\S+/.test(l));
+    if (bad) return setError(`“${bad}” isn't a full link. Links start with https://`);
     const photo = String(f.get("photo") ?? "").trim();
+    if (photo && !photo.startsWith("https://")) return setError("The photo link must start with https://");
     const name = String(f.get("name")).trim();
-    onSave({
-      id: `user-${Date.now()}`,
+    setError(null);
+    setSaving(true);
+    const err = await onSave({
       name,
-      city: String(f.get("city")).trim(),
-      category: String(f.get("category")),
-      lat: point.lat,
-      lng: point.lng,
+      address: String(f.get("address") ?? "").trim() || null,
+      city: String(f.get("city") ?? "").trim(),
+      category: String(f.get("category")) as PlaceInput["category"],
+      latitude: point.lat,
+      longitude: point.lng,
       description: String(f.get("description") ?? "").trim(),
-      photos: photo.startsWith("https://") ? [{ src: photo, alt: name }] : [],
-      links: url && platform ? [{ platform, url }] : [],
-      userAdded: true,
+      photos: photo ? [{ src: photo, alt: name }] : [],
+      social: socialFromLinks(links),
     });
+    setSaving(false);
+    if (err) setError(err);
   }
 
   const field = "mt-1 block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base";
@@ -774,11 +850,15 @@ function AddPlaceForm({
       <h2 className="text-lg font-semibold">Add a place</h2>
       <label className="block text-sm font-semibold">
         Name
-        <input ref={nameRef} name="name" required defaultValue={point.name} className={field} />
+        <input ref={nameRef} name="name" required maxLength={120} defaultValue={point.name} className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Address (optional)
+        <input name="address" maxLength={300} defaultValue={point.address} className={field} />
       </label>
       <label className="block text-sm font-semibold">
         City
-        <input name="city" required defaultValue={point.city || defaultCity} className={field} />
+        <input name="city" required maxLength={100} defaultValue={point.city || defaultCity} className={field} />
       </label>
       <label className="block text-sm font-semibold">
         Category
@@ -791,8 +871,8 @@ function AddPlaceForm({
         </select>
       </label>
       <label className="block text-sm font-semibold">
-        TikTok or Instagram link (optional)
-        <input name="url" type="url" inputMode="url" placeholder="https://www.tiktok.com/…" className={field} />
+        TikTok, Instagram or other links (optional, one per line)
+        <textarea name="links" rows={2} inputMode="url" placeholder="https://www.tiktok.com/…" className={`${field} rounded-card`} />
       </label>
       <label className="block text-sm font-semibold">
         Photo link (optional)
@@ -800,19 +880,71 @@ function AddPlaceForm({
       </label>
       <label className="block text-sm font-semibold">
         Description
-        <textarea name="description" rows={2} className={`${field} rounded-card`} />
+        <textarea name="description" rows={2} maxLength={1000} className={`${field} rounded-card`} />
       </label>
       {error && (
         <p role="alert" className="text-sm text-red-700">
           {error}
         </p>
       )}
-      <p className="text-xs text-muted">Saved in this browser only. Copy it as a content file to add it to the site.</p>
+      <p className="text-xs text-muted">
+        {storage === "database"
+          ? "Saved to the shared map, so it shows up on every device."
+          : "Demo mode: no database is connected here, so this disappears when the server restarts."}
+      </p>
       <div className="flex gap-2">
-        <button type="submit" className="min-h-11 rounded-pill bg-accent px-5 py-2 text-sm font-semibold text-accent-ink">
-          Save
+        <button type="submit" disabled={saving} className="min-h-11 rounded-pill bg-accent px-5 py-2 text-sm font-semibold text-accent-ink disabled:opacity-60">
+          {saving ? "Saving…" : "Save"}
         </button>
         <button type="button" onClick={onCancel} className="min-h-11 rounded-pill px-5 py-2 text-sm text-muted underline">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** Asks for the edit code once per device; checks it with the server before remembering it. */
+function EditCodePrompt({ onDone }: { onDone: (code: string | null) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  return (
+    <form
+      aria-label="Enter the edit code"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const code = String(new FormData(e.currentTarget).get("code") ?? "").trim();
+        if (!code) return;
+        setChecking(true);
+        const res = await checkEditCode(code);
+        setChecking(false);
+        if (res.ok) onDone(code);
+        else setError(res.error);
+      }}
+      className="absolute inset-x-3 top-16 z-40 space-y-3 rounded-card bg-surface p-4 shadow-soft sm:right-auto sm:w-96"
+    >
+      <h2 className="text-base font-semibold">Edit code</h2>
+      <p className="text-sm text-muted">Adding or removing places needs the edit code. You only enter it once on this device.</p>
+      <input
+        ref={inputRef}
+        name="code"
+        type="password"
+        autoComplete="current-password"
+        aria-label="Edit code"
+        className="block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base"
+      />
+      {error && (
+        <p role="alert" className="text-sm text-red-700">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button type="submit" disabled={checking} className="min-h-11 rounded-pill bg-accent px-5 py-2 text-sm font-semibold text-accent-ink disabled:opacity-60">
+          {checking ? "Checking…" : "Continue"}
+        </button>
+        <button type="button" onClick={() => onDone(null)} className="min-h-11 rounded-pill px-5 py-2 text-sm text-muted underline">
           Cancel
         </button>
       </div>
@@ -940,32 +1072,67 @@ function EmbedRow({ link, brand, tone, playing, onPlay, onClose }: EmbedRowProps
   );
 }
 
-/** Instagram search, any saved Instagram posts (reels play inline), then Google. */
+/**
+ * Below the TikTok dropdown: Instagram search, then saved links grouped by platform (one link = a row,
+ * several = a dropdown; Instagram reels play inline), then Google search.
+ */
 function OtherLinks({ place }: { place: MapPlace }) {
   const [playing, setPlaying] = useState<string | null>(null);
+  const groups = new Map<string, ShownLink[]>();
+  for (const l of place.links) {
+    if (l.platform === "tiktok") continue;
+    groups.set(l.platform, [...(groups.get(l.platform) ?? []), l]);
+  }
+  const plain = (l: ShownLink, tone: "light" | "nested") => (
+    <li key={l.url}>
+      <a
+        href={l.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm ${tone === "light" ? "bg-tag font-semibold" : "bg-surface"}`}
+      >
+        <span className="min-w-0 truncate">
+          {tone === "light" && platformLabel(l.platform)}
+          <span className={tone === "light" ? "font-normal text-muted" : ""}>
+            {tone === "light" ? " · " : ""}
+            {l.title ?? hostOf(l.url)}
+          </span>
+        </span>
+        <span aria-hidden>↗</span>
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+    </li>
+  );
+  const row = (l: ShownLink, tone: "light" | "nested") =>
+    l.platform === "instagram" && embedFor(l) ? (
+      <EmbedRow key={l.url} link={l} brand="Instagram" tone="light" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+    ) : (
+      plain(l, tone)
+    );
   return (
     <ul className="space-y-2">
-      {otherLinks(place).map((l) =>
-        l.platform === "instagram" && embedFor(l) ? (
-          <EmbedRow key={l.url} link={l} brand="Instagram" tone="light" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+      {plain({ platform: "instagram", url: instagramSearchUrl(place), title: `Search #${instagramTag(place)}` }, "light")}
+      {[...groups].map(([platform, links]) =>
+        links.length === 1 ? (
+          row(links[0], "light")
         ) : (
-          <li key={l.url}>
-            <a
-              href={l.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex min-h-11 items-center justify-between gap-3 rounded-pill bg-tag px-4 py-2 text-sm font-semibold"
-            >
-              <span>
-                {PLATFORM_LABEL[l.platform]}
-                {l.title && <span className="font-normal text-muted"> · {l.title}</span>}
-              </span>
-              <span aria-hidden>↗</span>
-              <span className="sr-only">(opens in a new tab)</span>
-            </a>
+          <li key={platform}>
+            <details className="group rounded-[1.375rem] bg-tag">
+              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+                <span>
+                  {platformLabel(platform)}
+                  <span className="font-normal text-muted"> · {links.length} links</span>
+                </span>
+                <span aria-hidden className="transition-transform group-open:rotate-180">
+                  ▾
+                </span>
+              </summary>
+              <ul className="space-y-1 px-2 pb-2">{links.map((l) => row(l, "nested"))}</ul>
+            </details>
           </li>
         ),
       )}
+      {plain({ platform: "google", url: googleSearchUrl(place), title: `Search “${place.name}”` }, "light")}
     </ul>
   );
 }

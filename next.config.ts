@@ -3,6 +3,8 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   /* config options here */
   cacheComponents: true,
+  // The in-memory place store (used when no DATABASE_URL is set) seeds itself from content/ at runtime.
+  outputFileTracingIncludes: { "/map": ["./content/**/*"] },
   partialPrefetching: true,
   async headers() {
     return [
