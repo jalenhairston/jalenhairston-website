@@ -490,6 +490,11 @@ test.describe("things-to-do map (POC)", () => {
           properties: { name: newName, osm_key: "amenity", osm_value: "cafe", street: "Newbury Street", housenumber: "399", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: String(run) },
         },
         {
+          // The pipeline's test stand-in finds nothing for names containing "Quiet".
+          geometry: { coordinates: [spot.lng + 0.003, spot.lat] },
+          properties: { name: `Quiet Spot ${run}`, osm_key: "amenity", osm_value: "cafe", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: `q${run}` },
+        },
+        {
           // On top of the existing Mike's Pastry entry, so it should be recognised as already on the map.
           geometry: { coordinates: [-71.0542, 42.3642] },
           properties: { name: "Mike's Pastry", osm_key: "shop", osm_value: "bakery", street: "Hanover Street", housenumber: "300", city: "Boston", state: "Massachusetts", osm_type: "N", osm_id: "2" },
@@ -604,6 +609,63 @@ test.describe("things-to-do map (POC)", () => {
       nominatimUp = false;
       await box.fill("another thing entirely");
       await expect(search.getByText(/Search isn't available right now/)).toBeVisible();
+    });
+
+    test("a new place gets photos and a TikTok found in the background, and keeps them after a reload", async ({ page }) => {
+      await stub(page);
+      const search = await openSearch(page);
+      await search.getByRole("searchbox", { name: "Search for a place" }).fill("tatte");
+      await search.getByRole("button", { name: new RegExp(newName) }).click();
+      await page.getByRole("form", { name: "Add a place" }).getByRole("button", { name: "Save" }).click();
+
+      const card = page.getByRole("region", { name: newName });
+      await expect(card.getByText("Looking for photos and TikToks…")).toBeVisible();
+      // The pipeline runs after the save response; the card checks back and fills in what it found.
+      await expect(card.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(1, { timeout: 15_000 });
+      await expect(card.getByText("Looking for photos and TikToks…")).toBeHidden();
+      await expect(card.locator("summary", { hasText: "TikTok" })).toContainText("1 video");
+      await card.locator("summary", { hasText: "TikTok" }).click();
+      const thumb = card.locator("details img");
+      await expect(thumb).toHaveAttribute("src", "/social-thumb/7000000000000000042");
+      await expect.poll(() => thumb.evaluate((i) => (i as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+      await expect(card.getByRole("button", { name: "Find photos & TikToks" })).toHaveCount(0); // complete now
+
+      // Saved on the server: a reload shows the same photo and video.
+      await page.reload();
+      await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+      await page.getByRole("button", { name: `${newName}, Boston (coffee)`, exact: true }).dispatchEvent("click");
+      const again = page.getByRole("region", { name: newName });
+      await expect(again.getByRole("list", { name: "Photos" }).getByRole("img")).toHaveCount(1);
+      await expect(again.locator("summary", { hasText: "TikTok" })).toContainText("1 video");
+      page.once("dialog", (d) => d.accept());
+      await again.getByRole("button", { name: "Remove from map" }).click();
+      await expect(again).toBeHidden();
+    });
+
+    test("an incomplete place offers 'Find photos & TikToks' and says when nothing turns up", async ({ page }) => {
+      await stub(page);
+      const search = await openSearch(page);
+      await search.getByRole("searchbox", { name: "Search for a place" }).fill("quiet");
+      await search.getByRole("button", { name: new RegExp(`Quiet Spot ${run}`) }).click();
+      await page.getByRole("form", { name: "Add a place" }).getByRole("button", { name: "Save" }).click();
+      const card = page.getByRole("region", { name: `Quiet Spot ${run}` });
+      const find = card.getByRole("button", { name: "Find photos & TikToks" });
+      await expect(find).toBeVisible({ timeout: 15_000 }); // background run found nothing
+      await find.click();
+      await expect(card.getByRole("status").filter({ hasText: "Nothing new found." })).toBeVisible();
+      page.once("dialog", (d) => d.accept());
+      await card.getByRole("button", { name: "Remove from map" }).click();
+      await expect(card).toBeHidden();
+    });
+
+    test("the cache-refresh endpoint and photo routes are locked down", async ({ request }) => {
+      expect((await request.post("/api/places/revalidate")).status()).toBe(401);
+      expect((await request.post("/api/places/revalidate", { headers: { "x-edit-code": "wrong" } })).status()).toBe(401);
+      expect((await request.post("/api/places/revalidate", { headers: { "x-edit-code": CODE } })).status()).toBe(200);
+      expect((await request.get("/social-thumb/not-a-video")).status()).toBe(404);
+      expect((await request.get("/social-thumb/1234567890123")).status()).toBe(404);
+      // No Google server key in tests: Google photo links 404 instead of erroring.
+      expect((await request.get("/place-photo/ChIJabcdefghij/0")).status()).toBe(404);
     });
 
     test("places saved only on this device (before the database) can be moved to the shared map", async ({ page }) => {

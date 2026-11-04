@@ -1,5 +1,5 @@
 import { PGlite } from "@electric-sql/pglite";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { placeInputSchema, type ValidPlaceInput } from "./places-model";
 import { migrate, splitStatements } from "./places-migrate";
 import { memoryStore, pgStore, type Query } from "./places-store";
@@ -18,6 +18,9 @@ const input = (over: Partial<Parameters<typeof placeInputSchema.parse>[0]> = {})
     ...over,
   });
 
+// Starting PGlite (Postgres in WASM) and running migrations takes a few seconds.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 let db: PGlite;
 let query: Query;
 beforeEach(async () => {
@@ -29,7 +32,7 @@ describe("migrate", () => {
   it("creates the Place table, seeds once, and never re-seeds", async () => {
     const seeds = [input({ id: "neptune-oyster" }), input({ id: "mikes-pastry", name: "Mike's Pastry" })];
     const first = await migrate(query, () => seeds);
-    expect(first).toEqual({ applied: ["0001_create_place.sql"], seeded: 2 });
+    expect(first).toEqual({ applied: ["0001_create_place.sql", "0002_enrichment.sql"], seeded: 2 });
     const store = pgStore(query);
     expect((await store.list()).map((p) => p.id)).toEqual(["neptune-oyster", "mikes-pastry"]);
 
@@ -83,4 +86,37 @@ describe("memoryStore", () => {
     expect(await store.remove(p.id)).toBe(true);
     expect(await store.count()).toBe(1);
   });
+});
+
+describe("enrichment storage", () => {
+  const stores = {
+    postgres: async () => {
+      await migrate(query, () => []);
+      return pgStore(query);
+    },
+    memory: async () => memoryStore([]),
+  };
+  for (const [name, make] of Object.entries(stores)) {
+    it(`${name}: updates only the patched fields and caches video labels + thumbnails`, async () => {
+      const store = await make();
+      const p = await store.create(input());
+      expect(p).toMatchObject({ googlePlaceId: null, enrichedAt: null, enrichment: {} });
+      const photos = [{ src: "/place-photo/ChIJ1/0", alt: "Neptune Oyster", credit: "Google Maps · A. Person" }];
+      const updated = await store.update(p.id, { photos, googlePlaceId: "ChIJ1", enrichment: { photos: "google", tiktok: 0 }, enrichedAt: "2026-11-04T12:00:00.000Z" });
+      expect(updated).toMatchObject({ photos, googlePlaceId: "ChIJ1", enrichment: { photos: "google", tiktok: 0 }, name: "Neptune Oyster", address: "63 Salem St, Boston, MA" });
+      expect(Date.parse(updated!.enrichedAt!)).toBe(Date.parse("2026-11-04T12:00:00.000Z"));
+      expect((await store.get(p.id))?.photos).toEqual(photos);
+      expect(await store.update("missing", { photos })).toBeNull();
+
+      const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0x00, 0x10, 0x4a]);
+      await store.upsertVideo({ videoId: "7320475537431055662", url: "https://www.tiktok.com/@a/video/7320475537431055662", label: "@a · lobster roll", thumb: bytes, thumbType: "image/jpeg" });
+      // A later upsert without a thumbnail keeps the stored one.
+      await store.upsertVideo({ videoId: "7320475537431055662", url: "https://www.tiktok.com/@a/video/7320475537431055662", label: null });
+      expect(await store.listVideos()).toEqual([{ videoId: "7320475537431055662", label: "@a · lobster roll", hasThumb: true }]);
+      const thumb = await store.getVideoThumb("7320475537431055662");
+      expect(Array.from(thumb!.bytes)).toEqual(Array.from(bytes));
+      expect(thumb!.type).toBe("image/jpeg");
+      expect(await store.getVideoThumb("nope")).toBeNull();
+    });
+  }
 });

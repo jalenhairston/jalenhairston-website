@@ -22,9 +22,18 @@ export type PlaceRecord = {
   city: string;
   category: string;
   photos: Photo[];
+  /** Google Places id, when the enrichment pipeline matched one (photos are fetched through it). */
+  googlePlaceId: string | null;
+  /** When the enrichment pipeline last ran for this place (null = never). */
+  enrichedAt: string | null;
+  /** What the pipeline found or why it could not, e.g. { photos: "commons", tiktok: 2, notes: [...] }. */
+  enrichment: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
+
+/** A TikTok video the pipeline (or the refresh script) looked at. */
+export type SocialVideo = { videoId: string; url: string; label: string | null; thumb?: Uint8Array | null; thumbType?: string | null };
 
 const httpsUrl = z.url().max(2048).refine((u) => u.startsWith("https://"), "links must start with https://");
 
@@ -93,6 +102,10 @@ export type MapPlace = {
   links: MapLink[];
   /** Legacy: saved only in this browser before places moved to the database. */
   userAdded: boolean;
+  /** When the enrichment pipeline last ran (null/undefined = not yet). */
+  enrichedAt?: string | null;
+  /** The pipeline's notes from its last run (what it found, or why it could not). */
+  enrichNotes?: string[];
 };
 
 export type SocialManifest = { items?: Record<string, { thumb?: string; label?: string }> };
@@ -124,5 +137,7 @@ export function toMapPlace(r: PlaceRecord, manifest: SocialManifest = {}): MapPl
     photos: r.photos,
     links,
     userAdded: false,
+    enrichedAt: r.enrichedAt,
+    ...(Array.isArray(r.enrichment.notes) ? { enrichNotes: (r.enrichment.notes as unknown[]).map(String) } : {}),
   };
 }

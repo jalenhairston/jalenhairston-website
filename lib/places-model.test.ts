@@ -48,12 +48,15 @@ describe("toMapPlace", () => {
     city: "Boston",
     category: "food",
     photos: [],
+    googlePlaceId: null,
+    enrichedAt: null,
+    enrichment: {},
     createdAt: "2026-11-04T00:00:00.000Z",
     updatedAt: "2026-11-04T00:00:00.000Z",
   };
   it("flattens social into links, adding cached thumbnails and captions for known TikToks", () => {
     const m = toMapPlace(rec, { items: { "7320475537431055662": { thumb: "/social/tt-x.jpg", label: "@lord_cappuccino · My favorite lobster roll" } } });
-    expect(m).toMatchObject({ id: "p1", lat: 42.36, lng: -71.05, userAdded: false });
+    expect(m).toMatchObject({ id: "p1", lat: 42.36, lng: -71.05, userAdded: false, enrichedAt: null });
     expect(m.address).toBeUndefined();
     expect(m.links).toEqual([
       { platform: "tiktok", url: rec.social.tiktok[0], title: "@lord_cappuccino · My favorite lobster roll", thumb: "/social/tt-x.jpg" },

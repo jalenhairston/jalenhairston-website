@@ -3,9 +3,9 @@
 // server actions call updateTag(PLACES_TAG) after every write.
 import "server-only";
 import { cacheLife, cacheTag } from "next/cache";
-import manifest from "@/content/social.json";
-import { toMapPlace, type MapPlace } from "./places-model";
+import type { MapPlace } from "./places-model";
 import { getStore } from "./places-db";
+import { toMapPlaces } from "./places-view";
 
 export const PLACES_TAG = "places";
 
@@ -15,5 +15,5 @@ export async function getMapPlaces(): Promise<{ places: MapPlace[]; storage: "da
   cacheLife("max");
   const store = getStore();
   const rows = await store.list();
-  return { places: rows.map((r) => toMapPlace(r, manifest)), storage: store.kind };
+  return { places: await toMapPlaces(store, rows), storage: store.kind };
 }

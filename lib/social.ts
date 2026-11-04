@@ -59,3 +59,25 @@ export function canWarm(connection: Connection): boolean {
   if (connection.saveData) return false;
   return !/^(slow-)?2g$/.test(connection.effectiveType ?? "");
 }
+
+/** "@author · first words of the caption…" for a dropdown row. */
+export function tiktokLabel(author: string, desc: string): string {
+  let t = desc.replace(/[#@]\S+/g, "").replace(/\s+/g, " ").trim().replace(/^[-–—:|·\s]+|[-–—:|·\s]+$/g, "");
+  if (t.length > 56) t = t.slice(0, 56).replace(/\s+\S*$/, "").replace(/[,.;:!-]+$/, "") + "…";
+  return t ? `@${author} · ${t}` : `Video by @${author}`;
+}
+
+export type TikTokPage = { id: string; author: string; desc: string; cover?: string };
+
+/** Read a TikTok video page's embedded data: caption, author and cover. Null if the video isn't there. */
+export function parseTikTokPage(html: string): TikTokPage | null {
+  const json = html.match(/<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/)?.[1];
+  if (!json) return null;
+  try {
+    const it = JSON.parse(json).__DEFAULT_SCOPE__?.["webapp.video-detail"]?.itemInfo?.itemStruct;
+    if (!it?.id || !it?.author?.uniqueId) return null;
+    return { id: String(it.id), author: String(it.author.uniqueId), desc: String(it.desc ?? ""), cover: it.video?.originCover || it.video?.cover || undefined };
+  } catch {
+    return null;
+  }
+}

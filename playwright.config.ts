@@ -15,7 +15,8 @@ export default defineConfig({
     url: `http://localhost:${port}`,
     timeout: 180_000,
     reuseExistingServer: !process.env.CI,
-    // No DATABASE_URL in tests: places use the in-memory store; this is the edit code the tests type in.
-    env: { PLACES_EDIT_CODE: "e2e-edit-code" },
+    // No DATABASE_URL in tests: places use the in-memory store; this is the edit code the tests type in,
+    // and the enrichment pipeline uses its deterministic stand-in instead of the network.
+    env: { PLACES_EDIT_CODE: "e2e-edit-code", PLACES_ENRICH_FAKE: "1" },
   },
 });

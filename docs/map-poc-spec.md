@@ -97,3 +97,20 @@ Places live in a `"Place"` table (`db/migrations/0001_create_place.sql`):
 - `PLACES_EDIT_CODE`: choose a passphrase; share it only with people who should edit. Server-only (no `NEXT_PUBLIC_` prefix).
 
 **Tests.** `lib/places-store.test.ts` runs the real migration and queries against PGlite (Postgres in WASM): CRUD, JSONB round-trips, table constraints, seed-once. e2e runs against the in-memory store with `PLACES_EDIT_CODE=e2e-edit-code` (see `playwright.config.ts`).
+
+## Enrichment pipeline (photos + TikToks)
+
+After every new place (and every place moved from a device), `createPlace`/`importPlaces` schedule `runEnrichment` with Next's `after()`, so saving is not slowed down. It only fills what is missing:
+
+1. **Photos** (if the place has none): Wikimedia Commons, searching by name and by location (within 150m). Businesses only accept files whose title names the place; landmarks (outdoors/culture) may also use photos taken within 80m. 429s are retried with backoff (`Retry-After`). If Commons has nothing: **Google Places photos** (needs `GOOGLE_PLACES_SERVER_KEY`). Google does not allow storing photo files or URLs, so only the Google place id is stored and `/place-photo/<placeId>/<n>` asks Google for a fresh photo URL on each view (redirect, cached 1h). Google photos show the photographer credit, as Google requires.
+2. **TikToks** (if the place has no playable TikTok): a web search via the **Brave Search API** (`BRAVE_SEARCH_API_KEY`) for `site:tiktok.com` video links; each candidate page is loaded and kept only if its caption names the place (up to 3). The cover is resized and stored in the `SocialVideo` table (TikTok's cover URLs expire in ~48h) and served from `/social-thumb/<videoId>`.
+
+Results and notes (e.g. "TikTok search is off (BRAVE_SEARCH_API_KEY is not set)") are stored on the place (`enrichment`, `enriched_at`), then the cached list is expired (`revalidateTag("places", { expire: 0 })`). The card shows "Looking for photos and TikToks…" and checks back (`getPlaceStatus`) until the run finishes. Places still missing something show **Find photos & TikToks** (edit code required; runs immediately).
+
+**Backfill existing places:** `DATABASE_URL=… BRAVE_SEARCH_API_KEY=… GOOGLE_PLACES_SERVER_KEY=… PLACES_EDIT_CODE=… npm run places:enrich -- --site https://<your-site>` (add `--all` to retry places that were already tried). `--site` calls `POST /api/places/revalidate` (edit code in `x-edit-code`) so the live list refreshes.
+
+**Keys (Vercel env, server-only, no `NEXT_PUBLIC_`):**
+- `BRAVE_SEARCH_API_KEY`: https://api.search.brave.com (check current free allowance).
+- `GOOGLE_PLACES_SERVER_KEY`: a second Google key, API restriction "Places API (New)", **no** website restriction (server calls send no referrer). Keep the daily quota cap.
+
+**Tests:** `lib/enrich.test.ts` covers each source with fixtures (relevance rules, Google fallback, TikTok caption checks, 429 retries, notes when keys are missing). e2e runs with `PLACES_ENRICH_FAKE=1`, a deterministic stand-in (no network), to cover the background run, polling, persistence, thumbnails and the Find button. Checked live from the sandbox: TikTok verification + thumbnails on real pages, and a real Commons match (Zaku Izakaya); Brave and Google calls are untested against the live services (no keys here).

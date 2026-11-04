@@ -11,7 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import matter from "gray-matter";
 import sharp from "sharp";
-import { parseTikTok } from "../lib/social";
+import { parseTikTok, tiktokLabel as labelFor } from "../lib/social";
 
 const ROOT = process.cwd();
 const PLACES = path.join(ROOT, "content/places");
@@ -22,12 +22,6 @@ const force = process.argv.includes("--force");
 
 type Item = { thumb?: string; label?: string; author?: string; durationSec?: number; status: "ok" | "unavailable"; fetchedAt: string };
 
-/** "@author · first words of the caption…" for the dropdown row. */
-function labelFor(author: string, desc: string): string {
-  let t = desc.replace(/[#@]\S+/g, "").replace(/\s+/g, " ").trim().replace(/^[-–—:|·\s]+|[-–—:|·\s]+$/g, "");
-  if (t.length > 56) t = t.slice(0, 56).replace(/\s+\S*$/, "").replace(/[,.;:!-]+$/, "") + "…";
-  return t ? `@${author} · ${t}` : `Video by @${author}`;
-}
 const manifest: { version: 1; items: Record<string, Item> } = fs.existsSync(MANIFEST)
   ? JSON.parse(fs.readFileSync(MANIFEST, "utf8"))
   : { version: 1, items: {} };

@@ -15,7 +15,8 @@
     "test:e2e": "playwright test",
     "social:refresh": "tsx scripts/refresh-social.ts",
     "db:migrate": "tsx scripts/db-migrate.ts",
-    "vercel-build": "npm run db:migrate && npm run build"
+    "vercel-build": "npm run db:migrate && npm run build",
+    "places:enrich": "tsx scripts/enrich-places.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.0",

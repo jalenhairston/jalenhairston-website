@@ -8,7 +8,7 @@ import Supercluster from "supercluster";
 import { canWarm, embedFor } from "@/lib/social";
 import { distanceMeters, findExisting, searchPlaces, type PlaceResult } from "@/lib/geocode";
 import { useEffect, useRef, useState } from "react";
-import { checkEditCode, createPlace, deletePlace, importPlaces } from "@/app/map/actions";
+import { checkEditCode, createPlace, deletePlace, enrichNow, getPlaceStatus, importPlaces } from "@/app/map/actions";
 import { socialFromLinks, type MapLink, type MapPlace, type PlaceInput } from "@/lib/places-model";
 
 export type { MapPlace, MapLink as PostLink, Photo } from "@/lib/places-model";
@@ -42,6 +42,10 @@ const hostOf = (url: string) => {
     return url;
   }
 };
+
+const tiktokVideoCount = (p: MapPlace) => p.links.filter((l) => l.platform === "tiktok" && embedFor(l)).length;
+/** A shared place still missing photos or a playable TikTok. */
+const needsEnrichment = (p: MapPlace) => !p.userAdded && (p.photos.length === 0 || tiktokVideoCount(p) === 0);
 
 /** Map place -> input for the server (used when moving legacy device-only places into the database). */
 function toInput(p: MapPlace): Omit<PlaceInput, "id"> {
@@ -165,6 +169,10 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
   const [askingCode, setAskingCode] = useState(false);
   const codeWaiter = useRef<((code: string | null) => void) | null>(null);
   const [moving, setMoving] = useState(false);
+  // Places whose photos/TikToks the pipeline is still looking up (the card shows a note and checks back).
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const [enriching, setEnriching] = useState(false);
+  const [enrichMsg, setEnrichMsg] = useState<{ id: string; text: string } | null>(null);
   const [zoom, setZoom] = useState(0);
   const [full, setFull] = useState(false);
   const [geoError, setGeoError] = useState<string | null>(null);
@@ -519,6 +527,54 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
     } catch {}
   }
 
+  const replacePlace = (p: MapPlace) => setPlaces((ps) => ps.map((x) => (x.id === p.id ? p : x)));
+
+  /** Check back on places the pipeline is enriching in the background until each one has run. */
+  function watchEnrichment(ids: string[]) {
+    if (!ids.length) return;
+    setPending((s) => new Set([...s, ...ids]));
+    for (const id of ids) {
+      void (async () => {
+        try {
+          for (const wait of [2000, 3000, 5000, 8000, 12000, 20000]) {
+            await new Promise((r) => setTimeout(r, wait));
+            const fresh = await getPlaceStatus(id);
+            if (!fresh) return;
+            if (fresh.enrichedAt) {
+              replacePlace(fresh);
+              return;
+            }
+          }
+        } catch {
+          // A missed check is fine: the next page load shows whatever the pipeline found.
+        } finally {
+          setPending((s) => new Set([...s].filter((x) => x !== id)));
+        }
+      })();
+    }
+  }
+
+  /** Run the pipeline now for one place and say what it found. */
+  async function findNow(p: MapPlace) {
+    const code = await requestCode();
+    if (!code) return;
+    setEnriching(true);
+    setEnrichMsg(null);
+    const res = await enrichNow(code, p.id);
+    setEnriching(false);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setEnrichMsg({ id: p.id, text: res.error });
+      return;
+    }
+    replacePlace(res.place);
+    const photos = res.place.photos.length - p.photos.length;
+    const videos = tiktokVideoCount(res.place) - tiktokVideoCount(p);
+    const found = [photos > 0 && `${photos} ${photos === 1 ? "photo" : "photos"}`, videos > 0 && `${videos} ${videos === 1 ? "TikTok" : "TikToks"}`].filter(Boolean);
+    const off = (res.place.enrichNotes ?? []).filter((n) => n.includes(" is off"));
+    setEnrichMsg({ id: p.id, text: `${found.length ? `Found ${found.join(" and ")}.` : "Nothing new found."}${off.length ? ` ${off.join(". ")}.` : ""}` });
+  }
+
   /** Save a new place to the shared list. Returns an error message, or null on success. */
   async function savePlace(input: Omit<PlaceInput, "id">): Promise<string | null> {
     const code = await requestCode();
@@ -531,6 +587,7 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
     setPlaces((ps) => [...ps, res.place]);
     setDraftPoint(null);
     setSelectedId(res.place.id);
+    if (needsEnrichment(res.place)) watchEnrichment([res.place.id]);
     return null;
   }
 
@@ -570,6 +627,7 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
       return;
     }
     setPlaces((ps) => [...ps, ...res.places]);
+    watchEnrichment(res.places.filter(needsEnrichment).map((p) => p.id));
     setUserPlaces([]);
     setSelectedId(null);
     try {
@@ -719,6 +777,8 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
                 <li key={ph.src} className="shrink-0 snap-start">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={ph.src} alt={ph.alt} loading="lazy" className="h-32 w-44 rounded-2xl bg-tag object-cover" />
+                  {/* Google requires its photos to show the photographer's attribution. */}
+                  {ph.credit?.startsWith("Google Maps") && <p className="mt-1 max-w-44 truncate text-[11px] text-muted">{ph.credit}</p>}
                 </li>
               ))}
             </ul>
@@ -728,6 +788,26 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
             <TikTokSection key={`tiktok-${selected.id}`} place={selected} />
             <OtherLinks key={`other-${selected.id}`} place={selected} />
           </div>
+          {pending.has(selected.id) && (
+            <p role="status" className="mt-3 text-sm text-muted">
+              Looking for photos and TikToks…
+            </p>
+          )}
+          {!pending.has(selected.id) && needsEnrichment(selected) && (
+            <button
+              type="button"
+              disabled={enriching}
+              onClick={() => findNow(selected)}
+              className="mt-3 min-h-11 rounded-pill bg-tag px-4 py-2 text-sm font-semibold disabled:opacity-60"
+            >
+              {enriching ? "Looking…" : "Find photos & TikToks"}
+            </button>
+          )}
+          {enrichMsg?.id === selected.id && (
+            <p role="status" className="mt-2 text-sm text-muted">
+              {enrichMsg.text}
+            </p>
+          )}
           <div className="mt-4 flex text-sm">
             <button type="button" onClick={() => removePlace(selected)} className="min-h-11 rounded-pill px-2 py-2 text-muted underline">
               Remove from map
