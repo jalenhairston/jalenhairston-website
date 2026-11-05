@@ -321,10 +321,13 @@ export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]
         el.type = "button";
         el.setAttribute("aria-label", `${p.name}, ${p.city}`);
         const active = p.id === selectedId;
-        el.className = `map-pin group relative block rounded-2xl transition-transform ${active ? "scale-110" : ""}`;
+        // MapLibre positions this element with a CSS transform. Never scale or transition the element itself:
+        // a CSS scale here multiplies MapLibre's translate too, pushing the pin off its spot (more so the
+        // further it is from the map's corner). The "selected" enlargement goes on the inner tile instead.
+        el.className = "map-pin group relative block rounded-2xl";
         el.style.zIndex = active ? "10" : "1";
         const tile = document.createElement("span");
-        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] shadow-soft ${p.userAdded ? "border-amber-500" : "border-white"} ${p.photos[0] ? "bg-surface" : "bg-tag"}`;
+        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] shadow-soft transition-transform ${active ? "scale-110" : ""} ${p.userAdded ? "border-amber-500" : "border-white"} ${p.photos[0] ? "bg-surface" : "bg-tag"}`;
         const thumb = p.photos[0];
         if (thumb) {
           const img = document.createElement("img");

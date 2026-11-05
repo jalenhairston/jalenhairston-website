@@ -709,6 +709,84 @@ test.describe("things-to-do map (POC)", () => {
     });
   });
 
+  test("the map is strictly flat: no tilt, no rotation, no 3D buildings", async ({ page }) => {
+    // A stub basemap that includes a 3D building layer like the real style does.
+    const square = { type: "Feature", properties: { height: 80 }, geometry: { type: "Polygon", coordinates: [[[-71.06, 42.36], [-71.059, 42.36], [-71.059, 42.361], [-71.06, 42.361], [-71.06, 42.36]]] } };
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({
+        json: {
+          version: 8,
+          sources: { b: { type: "geojson", data: { type: "FeatureCollection", features: [square] } } },
+          layers: [
+            { id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } },
+            { id: "building-3d", type: "fill-extrusion", source: "b", paint: { "fill-extrusion-height": ["get", "height"], "fill-extrusion-base": 0 } },
+          ],
+        },
+      }),
+    );
+    await page.goto("/map?debug-map");
+    type DebugMap = {
+      getMaxPitch(): number;
+      getPitch(): number;
+      getBearing(): number;
+      dragRotate: { isEnabled(): boolean };
+      touchPitch: { isEnabled(): boolean };
+      touchZoomRotate: { isEnabled(): boolean };
+      getPaintProperty(layer: string, prop: string): unknown;
+      isStyleLoaded(): boolean;
+    };
+    const read = () =>
+      page.evaluate(() => {
+        const m = (window as unknown as { __map?: DebugMap }).__map;
+        if (!m || !m.isStyleLoaded()) return null;
+        return {
+          maxPitch: m.getMaxPitch(),
+          pitch: m.getPitch(),
+          bearing: m.getBearing(),
+          dragRotate: m.dragRotate.isEnabled(),
+          touchPitch: m.touchPitch.isEnabled(),
+          pinchZoom: m.touchZoomRotate.isEnabled(),
+          height: m.getPaintProperty("building-3d", "fill-extrusion-height"),
+          base: m.getPaintProperty("building-3d", "fill-extrusion-base"),
+        };
+      });
+    await expect.poll(read).toEqual({ maxPitch: 0, pitch: 0, bearing: 0, dragRotate: false, touchPitch: false, pinchZoom: true, height: 0, base: 0 });
+  });
+
+  test("a selected pin stays on its spot while panning and zooming", async ({ page }) => {
+    await page.route("https://tiles.openfreemap.org/**", (route) =>
+      route.fulfill({ json: { version: 8, sources: {}, layers: [{ id: "bg", type: "background", paint: { "background-color": "#dbe4ee" } }] } }),
+    );
+    await page.goto("/map?debug-map");
+    await expect(page.locator('button[aria-label$="places, zoom in"]').first()).toBeVisible();
+    await page.getByRole("button", { name: "Neptune Oyster, Boston (food)", exact: true }).dispatchEvent("click");
+    await expect(page.getByRole("region", { name: "Neptune Oyster" })).toBeVisible();
+    type M = { getContainer(): HTMLElement; project(p: [number, number]): { x: number; y: number }; panBy(o: [number, number], a: object): void; zoomTo(z: number, a: object): void };
+    // Distance (px) between the selected pin's centre and where the map says Neptune Oyster is.
+    const offset = () =>
+      page.evaluate(() => {
+        const m = (window as unknown as { __map: M }).__map;
+        const box = m.getContainer().getBoundingClientRect();
+        // Pins are rebuilt when the zoom level changes, so the tile can be missing for a moment.
+        const tile = document.querySelector('button[aria-label="Neptune Oyster, Boston"] > span');
+        if (!tile) return Number.POSITIVE_INFINITY;
+        const r = tile.getBoundingClientRect();
+        const pt = m.project([-71.056, 42.36324]);
+        return Math.hypot(r.x + r.width / 2 - (box.x + pt.x), r.y + r.height / 2 - (box.y + pt.y));
+      });
+    await expect.poll(offset).toBeLessThan(2);
+    // The tile is still drawn larger while selected (48px pin, scaled up).
+    await expect.poll(() => page.locator('button[aria-label="Neptune Oyster, Boston"] > span:first-child').evaluate((e) => e.getBoundingClientRect().width)).toBeGreaterThan(50);
+    for (const move of [
+      () => (window as unknown as { __map: M }).__map.panBy([80, -50], { duration: 0 }),
+      () => (window as unknown as { __map: M }).__map.zoomTo(16.6, { around: [-71.06, 42.362], duration: 0 }),
+      () => (window as unknown as { __map: M }).__map.zoomTo(15.2, { around: [-71.05, 42.366], duration: 0 }),
+    ]) {
+      await page.evaluate(move);
+      await expect.poll(offset).toBeLessThan(2);
+    }
+  });
+
   test("menu links to the map", async ({ page }) => {
     await page.goto("/");
     await page.getByRole("button", { name: "Menu" }).click();
