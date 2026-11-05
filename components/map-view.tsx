@@ -1,0 +1,1322 @@
+"use client";
+
+// POC: things-to-do map. MapLibre + OpenFreeMap tiles (free, no API key).
+// Visitor-added places live in localStorage only (this device) and can be copied as content files.
+import "maplibre-gl/dist/maplibre-gl.css";
+import type { Map as MapLibreMap, Marker } from "maplibre-gl";
+import Supercluster from "supercluster";
+import { canWarm, embedFor } from "@/lib/social";
+import { distanceMeters, findExisting, searchPlaces, type PlaceResult } from "@/lib/geocode";
+import { useEffect, useRef, useState } from "react";
+import { checkEditCode, createPlace, deletePlace, enrichNow, getPlaceStatus, importPlaces } from "@/app/map/actions";
+import { socialFromLinks, type MapLink, type MapPlace, type PlaceInput } from "@/lib/places-model";
+
+export type { MapPlace, MapLink as PostLink, Photo } from "@/lib/places-model";
+export type DraftPoint = { lat: number; lng: number; name?: string; address?: string; city?: string; category?: string };
+
+const STYLE_URL = "https://tiles.openfreemap.org/styles/liberty";
+/** Legacy: places saved only in this browser before the shared database existed. */
+const STORAGE_KEY = "map-user-places-v1";
+/** The edit code is remembered on the device so it is asked for once. */
+const CODE_KEY = "map-edit-code";
+const CATEGORIES = ["food", "drinks", "coffee", "outdoors", "culture", "nightlife", "shopping", "other"] as const;
+const CATEGORY_EMOJI: Record<string, string> = {
+  food: "🍽️",
+  drinks: "🍸",
+  coffee: "☕",
+  outdoors: "🌳",
+  culture: "🏛️",
+  nightlife: "🌙",
+  shopping: "🛍️",
+  other: "📍",
+};
+/** Pins cluster up to this zoom; selecting a place flies one level past it so it always shows alone. */
+const CLUSTER_MAX_ZOOM = 14;
+const PLATFORM_LABEL: Record<string, string> = { tiktok: "TikTok", instagram: "Instagram", google: "Google", youtube: "YouTube", web: "Link" };
+const platformLabel = (p: string) => PLATFORM_LABEL[p] ?? p.charAt(0).toUpperCase() + p.slice(1);
+type ShownLink = MapLink;
+const hostOf = (url: string) => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "");
+  } catch {
+    return url;
+  }
+};
+
+const tiktokVideoCount = (p: MapPlace) => p.links.filter((l) => l.platform === "tiktok" && embedFor(l)).length;
+/** A shared place still missing photos or a playable TikTok. */
+const needsEnrichment = (p: MapPlace) => !p.userAdded && (p.photos.length === 0 || tiktokVideoCount(p) === 0);
+
+/** Map place -> input for the server (used when moving legacy device-only places into the database). */
+function toInput(p: MapPlace): Omit<PlaceInput, "id"> {
+  return {
+    name: p.name,
+    address: p.address ?? null,
+    description: p.description,
+    social: socialFromLinks(p.links.map((l) => l.url)),
+    latitude: p.lat,
+    longitude: p.lng,
+    city: p.city,
+    category: (CATEGORIES as readonly string[]).includes(p.category) ? (p.category as PlaceInput["category"]) : "other",
+    photos: p.photos.filter((x) => x.src.startsWith("https://")),
+  };
+}
+
+const tiktokSearchUrl = (p: MapPlace) => `https://www.tiktok.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
+
+/** Instagram has no stable logged-out text search URL, so search the place's hashtag (e.g. #neptuneoyster). */
+const instagramTag = (p: MapPlace) => p.name.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]/g, "");
+const instagramSearchUrl = (p: MapPlace) => `https://www.instagram.com/explore/tags/${instagramTag(p)}/`;
+
+/** Apple Maps: opens the Maps app on iPhone/iPad/Mac, and Apple Maps on the web elsewhere. */
+const appleMapsUrl = (p: MapPlace) => `https://maps.apple.com/?ll=${p.lat},${p.lng}&q=${encodeURIComponent(p.name)}`;
+
+const googleSearchUrl = (p: MapPlace) => `https://www.google.com/search?q=${encodeURIComponent(`${p.name} ${p.city}`)}`;
+
+/** Saved TikToks for the dropdown, with a TikTok search as the last row (and the only one if none are saved). */
+function tiktokLinks(p: MapPlace): { saved: ShownLink[]; search: ShownLink } {
+  return {
+    saved: p.links.filter((l) => l.platform === "tiktok"),
+    search: { platform: "tiktok", url: tiktokSearchUrl(p), title: `Search “${p.name}”` },
+  };
+}
+
+
+// --- Background warm-up -------------------------------------------------------------------------
+// When a place is broken out of a cluster we pre-fetch its (self-hosted, immutable) video thumbnails
+// at idle priority, nearest to the map centre first, so the TikTok dropdown opens instantly.
+// The embeds themselves are never pre-loaded: TikTok/Instagram serve them `no-store` (uncacheable,
+// ~1MB each), so they only load when someone taps play.
+const MAX_WARM_PLACES = 30;
+const THUMBS_PER_PLACE = 4;
+const warmed = new Set<string>();
+const warmQueue: MapPlace[] = [];
+const warmImages: HTMLImageElement[] = []; // keep references until loaded
+let warmScheduled = false;
+
+function warmNow(p: MapPlace) {
+  if (warmed.has(p.id) || warmed.size >= MAX_WARM_PLACES) return;
+  warmed.add(p.id);
+  for (const l of p.links.filter((x) => x.thumb).slice(0, THUMBS_PER_PLACE)) {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = l.thumb!;
+    warmImages.push(img);
+  }
+}
+
+function drainWarmQueue() {
+  warmScheduled = false;
+  for (let i = 0; i < 2 && warmQueue.length; i++) warmNow(warmQueue.shift()!);
+  if (warmQueue.length) scheduleDrain();
+}
+
+function scheduleDrain() {
+  if (warmScheduled) return;
+  warmScheduled = true;
+  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number };
+  if (w.requestIdleCallback) w.requestIdleCallback(drainWarmQueue, { timeout: 2000 });
+  else setTimeout(drainWarmQueue, 200);
+}
+
+function warmPlaces(places: MapPlace[], center: { lat: number; lng: number }) {
+  if (!canWarm((navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection)) return;
+  const dist = (p: MapPlace) => (p.lat - center.lat) ** 2 + (p.lng - center.lng) ** 2;
+  for (const p of places) {
+    if (warmed.has(p.id) || warmQueue.some((q) => q.id === p.id) || !p.links.some((l) => l.thumb)) continue;
+    warmQueue.push(p);
+  }
+  warmQueue.sort((a, b) => dist(a) - dist(b));
+  if (warmQueue.length) scheduleDrain();
+}
+
+/** Open a connection to the embed host just before it is needed (first dropdown open / play). */
+function preconnect(origin: string) {
+  if (document.head.querySelector(`link[rel="preconnect"][href="${origin}"]`)) return;
+  const link = document.createElement("link");
+  link.rel = "preconnect";
+  link.href = origin;
+  document.head.append(link);
+}
+
+function loadUserPlaces(): MapPlace[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
+    return Array.isArray(parsed)
+      ? (parsed as MapPlace[])
+          .filter((p) => typeof p?.lat === "number" && typeof p?.lng === "number")
+          .map((p) => ({ ...p, userAdded: true, photos: Array.isArray(p.photos) ? p.photos : [], links: Array.isArray(p.links) ? p.links : [] }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+
+export function MapView({ places: initialPlaces, storage }: { places: MapPlace[]; storage: "database" | "memory" }) {
+  const [places, setPlaces] = useState<MapPlace[]>(initialPlaces);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const markersRef = useRef<Marker[]>([]);
+  const addModeRef = useRef(false);
+  const [mapReady, setMapReady] = useState(false);
+  const [mapError, setMapError] = useState(false);
+  const [userPlaces, setUserPlaces] = useState<MapPlace[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [draftPoint, setDraftPoint] = useState<DraftPoint | null>(null);
+  const [editCode, setEditCode] = useState<string | null>(null);
+  const [askingCode, setAskingCode] = useState(false);
+  const codeWaiter = useRef<((code: string | null) => void) | null>(null);
+  const [moving, setMoving] = useState(false);
+  // Places whose photos/TikToks the pipeline is still looking up (the card shows a note and checks back).
+  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const [enriching, setEnriching] = useState(false);
+  const [enrichMsg, setEnrichMsg] = useState<{ id: string; text: string } | null>(null);
+  const [zoom, setZoom] = useState(0);
+  const [full, setFull] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const [userPos, setUserPos] = useState<{ lat: number; lng: number } | null>(null);
+  const userMarkerRef = useRef<Marker | null>(null);
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  const all = [...places, ...userPlaces];
+  const selected = all.find((p) => p.id === selectedId) ?? null;
+
+  useEffect(() => {
+    // Hydrate from localStorage after mount (not available during prerender).
+    const saved = loadUserPlaces();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (saved.length > 0) setUserPlaces(saved);
+    try {
+      const code = localStorage.getItem(CODE_KEY);
+      if (code) setEditCode(code);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    addModeRef.current = adding;
+  }, [adding]);
+
+  // Create the map once.
+  useEffect(() => {
+    let cancelled = false;
+    let map: MapLibreMap | undefined;
+    (async () => {
+      try {
+        const maplibre = await import("maplibre-gl");
+        maplibre.setWorkerUrl("/vendor/maplibre-gl-worker.mjs");
+        if (cancelled || !containerRef.current) return;
+        map = new maplibre.Map({
+          container: containerRef.current,
+          style: STYLE_URL,
+          center: [-30, 30],
+          zoom: 1.4,
+          attributionControl: { compact: true },
+          // Strictly flat map: no tilt, no rotation. A tilted map makes pins look like they slide across
+          // the (3D) buildings as you zoom and puts a tapped rooftop on the wrong ground spot, and without
+          // a compass there is no way back to north-up.
+          pitch: 0,
+          maxPitch: 0,
+          bearing: 0,
+          dragRotate: false,
+          touchPitch: false,
+          pitchWithRotate: false,
+        });
+        map.touchZoomRotate.disableRotation(); // pinch still zooms, two fingers no longer rotate
+        map.keyboard.disableRotation();
+        // The basemap draws 3D buildings from zoom 14. Flatten them so footprints stay put under the pins.
+        const flattenBuildings = () => {
+          if (!map?.getLayer("building-3d")) return;
+          map.setPaintProperty("building-3d", "fill-extrusion-height", 0);
+          map.setPaintProperty("building-3d", "fill-extrusion-base", 0);
+        };
+        map.on("style.load", flattenBuildings);
+        flattenBuildings();
+        if (places.length > 0) {
+          // Start on the city with the most places; the rest of the world is a zoom-out away.
+          const counts = new Map<string, number>();
+          places.forEach((p) => counts.set(p.city, (counts.get(p.city) ?? 0) + 1));
+          const home = [...counts.entries()].sort((x, y) => y[1] - x[1])[0][0];
+          const bounds = new maplibre.LngLatBounds();
+          places.filter((p) => p.city === home).forEach((p) => bounds.extend([p.lng, p.lat]));
+          map.fitBounds(bounds, { padding: { top: 100, bottom: 100, left: 70, right: 70 }, maxZoom: 13, duration: 0 });
+        }
+        map.addControl(new maplibre.NavigationControl({ showCompass: false }), "top-right");
+        setZoom(Math.floor(map.getZoom()));
+        map.on("zoomend", () => setZoom(Math.floor(map!.getZoom())));
+        map.on("click", (e) => {
+          if (!addModeRef.current) return;
+          setDraftPoint({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+          setAdding(false);
+        });
+        map.on("error", (e) => {
+          // Style/tile fetch failure with nothing drawn: surface it instead of a blank box.
+          if (!map?.isStyleLoaded() && !map?.loaded()) setMapError(true);
+          console.warn("map error", e.error);
+        });
+        mapRef.current = map;
+        // Debug/test hook: `/map?debug-map` exposes the map instance as window.__map.
+        if (new URLSearchParams(window.location.search).has("debug-map")) (window as unknown as { __map?: MapLibreMap }).__map = map;
+        setMapReady(true);
+      } catch {
+        setMapError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      markersRef.current.forEach((m) => m.remove());
+      markersRef.current = [];
+      map?.remove();
+      mapRef.current = null;
+    };
+    // Created once; later place changes only update markers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Sync markers whenever the place list or selection changes.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    let cancelled = false;
+    (async () => {
+      const { Marker: MarkerCtor } = await import("maplibre-gl");
+      if (cancelled) return;
+      markersRef.current.forEach((m) => m.remove());
+      const byId = new Map(all.map((p) => [p.id, p]));
+      const index = new Supercluster<{ id: string }>({ radius: 32, minPoints: 3, maxZoom: CLUSTER_MAX_ZOOM });
+      index.load(
+        all.map((p) => ({
+          type: "Feature" as const,
+          properties: { id: p.id },
+          geometry: { type: "Point" as const, coordinates: [p.lng, p.lat] },
+        })),
+      );
+      const items = index.getClusters([-180, -85, 180, 85], zoom);
+      markersRef.current = items.map((item) => {
+        const [lng, lat] = item.geometry.coordinates as [number, number];
+        const props = item.properties as { cluster?: boolean; cluster_id?: number; point_count?: number; id?: string };
+        if (props.cluster) {
+          const count = props.point_count ?? 0;
+          const el = document.createElement("button");
+          el.type = "button";
+          el.setAttribute("aria-label", `${count} places, zoom in`);
+          el.className =
+            "grid size-11 place-items-center rounded-full border-[3px] border-white bg-accent text-sm font-bold text-accent-ink shadow-soft";
+          el.style.zIndex = "2";
+          el.textContent = String(count);
+          el.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            if (addModeRef.current) return;
+            map.easeTo({
+              center: [lng, lat],
+              zoom: Math.min(index.getClusterExpansionZoom(props.cluster_id as number), CLUSTER_MAX_ZOOM + 1),
+              duration: 500,
+            });
+          });
+          return new MarkerCtor({ element: el }).setLngLat([lng, lat]).addTo(map);
+        }
+        const p = byId.get(props.id as string)!;
+        const el = document.createElement("button");
+        el.type = "button";
+        el.setAttribute("aria-label", `${p.name}, ${p.city}`);
+        const active = p.id === selectedId;
+        // MapLibre positions this element with a CSS transform. Never scale or transition the element itself:
+        // a CSS scale here multiplies MapLibre's translate too, pushing the pin off its spot (more so the
+        // further it is from the map's corner). The "selected" enlargement goes on the inner tile instead.
+        el.className = "map-pin group relative block rounded-2xl";
+        el.style.zIndex = active ? "10" : "1";
+        const tile = document.createElement("span");
+        tile.className = `block size-full overflow-hidden rounded-2xl border-[3px] shadow-soft transition-transform ${active ? "scale-110" : ""} ${p.userAdded ? "border-amber-500" : "border-white"} ${p.photos[0] ? "bg-surface" : "bg-tag"}`;
+        const thumb = p.photos[0];
+        if (thumb) {
+          const img = document.createElement("img");
+          img.src = thumb.src;
+          img.alt = "";
+          img.loading = "lazy";
+          img.draggable = false;
+          img.className = "size-full object-cover";
+          tile.append(img);
+        } else {
+          tile.classList.add("grid", "place-items-center", "text-xl");
+          tile.textContent = CATEGORY_EMOJI[p.category] ?? CATEGORY_EMOJI.other;
+        }
+        const label = document.createElement("span");
+        label.setAttribute("aria-hidden", "true");
+        label.textContent = p.name;
+        label.className =
+          "map-pin-label pointer-events-none absolute top-full left-1/2 mt-1 max-w-28 -translate-x-1/2 truncate rounded-pill bg-white/90 px-1.5 py-0.5 text-[10px] leading-tight font-semibold text-ink shadow-soft";
+        el.append(tile, label);
+        el.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (addModeRef.current) return;
+          setSelectedId(p.id);
+        });
+        return new MarkerCtor({ element: el }).setLngLat([lng, lat]).addTo(map);
+      });
+      // Places now showing as individual pins get their thumbnails warmed in the background.
+      const c = map.getCenter();
+      warmPlaces(
+        items.flatMap((it) => {
+          const props = it.properties as { cluster?: boolean; id?: string };
+          return props.cluster ? [] : [byId.get(props.id as string)!];
+        }),
+        { lat: c.lat, lng: c.lng },
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapReady, places, userPlaces, selectedId, zoom]);
+
+  // Opening a card warms that place's thumbnails right away (no-op if already warmed).
+  useEffect(() => {
+    const p = [...places, ...userPlaces].find((x) => x.id === selectedId);
+    if (p) warmNow(p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId]);
+
+  // Fly to whichever place gets selected (pin tap or the hidden list).
+  useEffect(() => {
+    const map = mapRef.current;
+    const p = [...places, ...userPlaces].find((x) => x.id === selectedId);
+    if (!map || !mapReady || !p) return;
+    // On phones the bottom sheet covers the lower half, so keep the pin in the visible top part.
+    const bottom = window.innerWidth < 640 ? Math.round(map.getContainer().clientHeight * 0.55) : 0;
+    map.easeTo({ center: [p.lng, p.lat], zoom: Math.max(map.getZoom(), CLUSTER_MAX_ZOOM + 1), duration: 600, padding: { bottom } });
+    // Only re-run when the selection changes, not when the lists update.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, mapReady]);
+
+  // Location is on by default: watch the position and keep a blue dot on the map. (The browser still
+  // asks permission once; if it is declined we say so and carry on without a dot.)
+  useEffect(() => {
+    if (!mapReady || !("geolocation" in navigator)) return;
+    const id = navigator.geolocation.watchPosition(
+      (pos) => {
+        setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGeoError(null);
+      },
+      (err) =>
+        setGeoError(
+          err.code === 1
+            ? "Location is blocked. Allow it for this site in your browser settings to see where you are."
+            : "Couldn't find your location. Try again outdoors or with location services on.",
+        ),
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 20_000 },
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, [mapReady]);
+
+  // Draw / move the user's dot.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !userPos) return;
+    let cancelled = false;
+    (async () => {
+      if (userMarkerRef.current) {
+        userMarkerRef.current.setLngLat([userPos.lng, userPos.lat]);
+        return;
+      }
+      const { Marker: MarkerCtor } = await import("maplibre-gl");
+      if (cancelled || userMarkerRef.current) return;
+      const el = document.createElement("div");
+      el.dataset.testid = "user-location";
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", "Your location");
+      el.className = "size-4 rounded-full border-2 border-white bg-blue-600 shadow-soft";
+      el.style.boxShadow = "0 0 0 7px rgb(37 99 235 / 0.25)";
+      el.style.pointerEvents = "none";
+      el.style.zIndex = "5";
+      userMarkerRef.current = new MarkerCtor({ element: el }).setLngLat([userPos.lng, userPos.lat]).addTo(map);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [mapReady, userPos]);
+
+  useEffect(
+    () => () => {
+      userMarkerRef.current?.remove();
+      userMarkerRef.current = null;
+    },
+    [],
+  );
+
+  // Location notices fade on their own so they never sit over the map for long.
+  useEffect(() => {
+    if (!geoError) return;
+    const t = setTimeout(() => setGeoError(null), 9000);
+    return () => clearTimeout(t);
+  }, [geoError]);
+
+  function centerOnMe() {
+    const map = mapRef.current;
+    if (!map) return;
+    if (userPos) {
+      setGeoError(null);
+      map.easeTo({ center: [userPos.lng, userPos.lat], zoom: Math.max(map.getZoom(), 15), duration: 600 });
+      return;
+    }
+    // No fix yet (still waiting, or permission was declined): ask once more so the prompt can reappear.
+    navigator.geolocation?.getCurrentPosition(
+      (pos) => {
+        setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+        setGeoError(null);
+        map.easeTo({ center: [pos.coords.longitude, pos.coords.latitude], zoom: Math.max(map.getZoom(), 15), duration: 600 });
+      },
+      () =>
+        setGeoError("Location is blocked or unavailable. Allow it for this site in your browser settings to see where you are."),
+      { enableHighAccuracy: true, timeout: 15_000 },
+    );
+  }
+
+  // Escape closes the card / cancels add mode; with nothing open it leaves full screen.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (selectedId || adding || draftPoint) {
+        setSelectedId(null);
+        setAdding(false);
+        setDraftPoint(null);
+      } else {
+        setFull(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [selectedId, adding, draftPoint]);
+
+  // Full screen: a fixed overlay that works everywhere (iOS Safari has no Fullscreen API for
+  // elements), plus the native Fullscreen API where it exists to hide the browser chrome.
+  useEffect(() => {
+    if (!full) return;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    try {
+      shellRef.current?.requestFullscreen?.().catch(() => {});
+    } catch {}
+    const onChange = () => {
+      if (!document.fullscreenElement) setFull(false);
+    };
+    document.addEventListener("fullscreenchange", onChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onChange);
+      document.body.style.overflow = prevOverflow;
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    };
+  }, [full]);
+
+  // The map must re-measure its container whenever the shell changes size.
+  useEffect(() => {
+    const id = requestAnimationFrame(() => mapRef.current?.resize());
+    return () => cancelAnimationFrame(id);
+  }, [full, mapReady]);
+
+  /** The edit code, asking for it (once per device) if we don't have it yet. Null if the person cancels. */
+  function requestCode(): Promise<string | null> {
+    if (editCode) return Promise.resolve(editCode);
+    setAskingCode(true);
+    return new Promise((resolve) => {
+      codeWaiter.current = resolve;
+    });
+  }
+
+  function forgetCode() {
+    setEditCode(null);
+    try {
+      localStorage.removeItem(CODE_KEY);
+    } catch {}
+  }
+
+  const replacePlace = (p: MapPlace) => setPlaces((ps) => ps.map((x) => (x.id === p.id ? p : x)));
+
+  /** Check back on places the pipeline is enriching in the background until each one has run. */
+  function watchEnrichment(ids: string[]) {
+    if (!ids.length) return;
+    setPending((s) => new Set([...s, ...ids]));
+    for (const id of ids) {
+      void (async () => {
+        try {
+          for (const wait of [2000, 3000, 5000, 8000, 12000, 20000]) {
+            await new Promise((r) => setTimeout(r, wait));
+            const fresh = await getPlaceStatus(id);
+            if (!fresh) return;
+            if (fresh.enrichedAt) {
+              replacePlace(fresh);
+              return;
+            }
+          }
+        } catch {
+          // A missed check is fine: the next page load shows whatever the pipeline found.
+        } finally {
+          setPending((s) => new Set([...s].filter((x) => x !== id)));
+        }
+      })();
+    }
+  }
+
+  /** Run the pipeline now for one place and say what it found. */
+  async function findNow(p: MapPlace) {
+    const code = await requestCode();
+    if (!code) return;
+    setEnriching(true);
+    setEnrichMsg(null);
+    const res = await enrichNow(code, p.id);
+    setEnriching(false);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setEnrichMsg({ id: p.id, text: res.error });
+      return;
+    }
+    replacePlace(res.place);
+    const photos = res.place.photos.length - p.photos.length;
+    const videos = tiktokVideoCount(res.place) - tiktokVideoCount(p);
+    const found = [photos > 0 && `${photos} ${photos === 1 ? "photo" : "photos"}`, videos > 0 && `${videos} ${videos === 1 ? "TikTok" : "TikToks"}`].filter(Boolean);
+    const off = (res.place.enrichNotes ?? []).filter((n) => n.includes(" is off"));
+    setEnrichMsg({ id: p.id, text: `${found.length ? `Found ${found.join(" and ")}.` : "Nothing new found."}${off.length ? ` ${off.join(". ")}.` : ""}` });
+  }
+
+  /** Save a new place to the shared list. Returns an error message, or null on success. */
+  async function savePlace(input: Omit<PlaceInput, "id">): Promise<string | null> {
+    const code = await requestCode();
+    if (!code) return "An edit code is needed to save.";
+    const res = await createPlace(code, input);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      return res.error;
+    }
+    setPlaces((ps) => [...ps, res.place]);
+    setDraftPoint(null);
+    setSelectedId(res.place.id);
+    if (needsEnrichment(res.place)) watchEnrichment([res.place.id]);
+    return null;
+  }
+
+  async function removePlace(p: MapPlace) {
+    if (p.userAdded) {
+      const next = userPlaces.filter((x) => x.id !== p.id);
+      setUserPlaces(next);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch {}
+      setSelectedId(null);
+      return;
+    }
+    if (!window.confirm(`Remove “${p.name}” from the map for everyone?`)) return;
+    const code = await requestCode();
+    if (!code) return;
+    const res = await deletePlace(code, p.id);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setGeoError(res.error);
+      return;
+    }
+    setPlaces((ps) => ps.filter((x) => x.id !== p.id));
+    setSelectedId(null);
+  }
+
+  /** Move places saved only in this browser (before the database) into the shared list. */
+  async function moveLocalPlaces() {
+    const code = await requestCode();
+    if (!code) return;
+    setMoving(true);
+    const res = await importPlaces(code, userPlaces.map(toInput));
+    setMoving(false);
+    if (!res.ok) {
+      if (res.reason === "auth") forgetCode();
+      setGeoError(res.error);
+      return;
+    }
+    setPlaces((ps) => [...ps, ...res.places]);
+    watchEnrichment(res.places.filter(needsEnrichment).map((p) => p.id));
+    setUserPlaces([]);
+    setSelectedId(null);
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {}
+    if (res.skipped) setGeoError(`${res.skipped} place(s) couldn't be moved because some details were invalid.`);
+  }
+
+  return (
+    <div
+      ref={shellRef}
+      data-testid="map-shell"
+      data-fullscreen={full}
+      className={
+        full
+          ? "fixed inset-0 z-50 h-dvh overflow-hidden bg-tag"
+          : "relative h-[calc(100dvh-9.5rem)] min-h-[26rem] overflow-hidden rounded-card bg-tag shadow-soft"
+      }
+    >
+      {/* MapLibre forces position:relative on its container, so size it via a wrapper. */}
+      <div className={`absolute inset-0 ${adding ? "cursor-crosshair" : ""}`}>
+        <div ref={containerRef} className="h-full w-full" />
+      </div>
+
+      {geoError && !adding && (
+        <p
+          role="alert"
+          className="absolute top-16 left-3 z-10 max-w-[calc(100%-5.5rem)] rounded-card bg-surface px-4 py-2 text-sm shadow-soft"
+        >
+          {geoError}
+        </p>
+      )}
+
+      {mapError && (
+        <p role="alert" className="absolute inset-x-4 top-4 z-10 rounded-card bg-surface p-4 text-sm shadow-soft">
+          The map couldn&apos;t load. Check your connection and refresh.
+        </p>
+      )}
+
+      {/* No-JS / screen reader friendly list of the same places. */}
+      <ul className="sr-only">
+        {all.map((p) => (
+          <li key={p.id}>
+            <button type="button" onClick={() => setSelectedId(p.id)}>
+              {p.name}, {p.city} ({p.category})
+            </button>
+          </li>
+        ))}
+      </ul>
+
+      <div className="absolute top-3 left-3 z-10 flex gap-2" style={full ? { top: "max(0.75rem, env(safe-area-inset-top))" } : undefined}>
+        <button
+          type="button"
+          onClick={async () => {
+            if (adding) {
+              setAdding(false);
+              return;
+            }
+            setSelectedId(null);
+            setDraftPoint(null);
+            if (await requestCode()) setAdding(true);
+          }}
+          aria-pressed={adding}
+          className="min-h-11 rounded-pill bg-accent px-4 py-2 text-sm font-semibold text-accent-ink shadow-soft"
+        >
+          {adding ? "Cancel" : "+ Add place"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setFull((f) => !f)}
+          aria-pressed={full}
+          aria-label={full ? "Exit full screen" : "Full screen"}
+          className="grid min-h-11 min-w-11 place-items-center rounded-pill bg-surface px-3 text-base font-semibold shadow-soft"
+        >
+          <span aria-hidden>{full ? "✕" : "⛶"}</span>
+        </button>
+        <button
+          type="button"
+          onClick={centerOnMe}
+          aria-label="Center on my location"
+          className="grid min-h-11 min-w-11 place-items-center rounded-pill bg-surface px-3 text-base font-semibold shadow-soft"
+        >
+          <span aria-hidden>◎</span>
+        </button>
+      </div>
+
+      {adding && (
+        <PlaceSearch
+          getNear={() => {
+            const c = mapRef.current?.getCenter();
+            const near = c ? { lat: c.lat, lng: c.lng } : { lat: 42.36, lng: -71.06 };
+            return { ...near, city: nearestCity(near, all) || undefined };
+          }}
+          places={all}
+          onPick={(r) => {
+            setDraftPoint({ lat: r.lat, lng: r.lng, name: r.name, address: r.detail, city: r.city, category: r.category });
+            setAdding(false);
+            const map = mapRef.current;
+            // Keep the spot visible above the form sheet on phones.
+            const bottom = window.innerWidth < 640 ? Math.round((map?.getContainer().clientHeight ?? 0) * 0.55) : 0;
+            map?.easeTo({ center: [r.lng, r.lat], zoom: Math.max(map.getZoom(), 16), duration: 600, padding: { bottom } });
+          }}
+          onPickExisting={(p) => {
+            setAdding(false);
+            setSelectedId(p.id);
+          }}
+        />
+      )}
+
+      {selected && !draftPoint && (
+        <section
+          aria-label={selected.name}
+          className="absolute inset-x-0 bottom-0 z-20 max-h-[60%] overflow-y-auto rounded-t-card bg-surface p-5 pb-6 shadow-soft sm:inset-x-auto sm:bottom-4 sm:left-4 sm:w-96 sm:rounded-card"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold leading-tight">{selected.name}</h2>
+              <p className="mt-1 text-sm text-muted">
+                {selected.city} · <span className="capitalize">{selected.category}</span>
+                {selected.userAdded && " · only on this device"}
+              </p>
+              {selected.address && <p className="mt-0.5 text-sm text-muted">{selected.address}</p>}
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedId(null)}
+              aria-label="Close"
+              className="grid size-10 shrink-0 place-items-center rounded-pill bg-tag text-lg"
+            >
+              ×
+            </button>
+          </div>
+          <a
+            href={appleMapsUrl(selected)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex min-h-8 items-center gap-1.5 rounded-pill bg-tag px-3 py-1 text-sm"
+          >
+            <span aria-hidden>📍</span>
+            Open in Apple Maps
+            <span aria-hidden>↗</span>
+            <span className="sr-only">(opens in a new tab)</span>
+          </a>
+          {selected.photos.length > 0 && (
+            <ul aria-label="Photos" className="-mx-5 mt-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-5 pb-1">
+              {selected.photos.map((ph) => (
+                <li key={ph.src} className="shrink-0 snap-start">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={ph.src} alt={ph.alt} loading="lazy" className="h-32 w-44 rounded-2xl bg-tag object-cover" />
+                  {/* Google requires its photos to show the photographer's attribution. */}
+                  {ph.credit?.startsWith("Google Maps") && <p className="mt-1 max-w-44 truncate text-[11px] text-muted">{ph.credit}</p>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {selected.description && <p className="mt-3 text-sm whitespace-pre-line">{selected.description}</p>}
+          <div className="mt-4 space-y-2">
+            <TikTokSection key={`tiktok-${selected.id}`} place={selected} />
+            <OtherLinks key={`other-${selected.id}`} place={selected} />
+          </div>
+          {pending.has(selected.id) && (
+            <p role="status" className="mt-3 text-sm text-muted">
+              Looking for photos and TikToks…
+            </p>
+          )}
+          {!pending.has(selected.id) && needsEnrichment(selected) && (
+            <button
+              type="button"
+              disabled={enriching}
+              onClick={() => findNow(selected)}
+              className="mt-3 min-h-11 rounded-pill bg-tag px-4 py-2 text-sm font-semibold disabled:opacity-60"
+            >
+              {enriching ? "Looking…" : "Find photos & TikToks"}
+            </button>
+          )}
+          {enrichMsg?.id === selected.id && (
+            <p role="status" className="mt-2 text-sm text-muted">
+              {enrichMsg.text}
+            </p>
+          )}
+          <div className="mt-4 flex text-sm">
+            <button type="button" onClick={() => removePlace(selected)} className="min-h-11 rounded-pill px-2 py-2 text-muted underline">
+              Remove from map
+            </button>
+          </div>
+        </section>
+      )}
+
+      {draftPoint && (
+        <AddPlaceForm
+          point={draftPoint}
+          defaultCity={nearestCity(draftPoint, all)}
+          onCancel={() => setDraftPoint(null)}
+          storage={storage}
+          onSave={savePlace}
+        />
+      )}
+
+      {userPlaces.length > 0 && !adding && !draftPoint && !selected && (
+        <div role="status" className="absolute inset-x-3 bottom-12 z-10 flex items-center justify-between gap-3 rounded-card bg-surface px-4 py-2 text-sm shadow-soft sm:right-auto sm:w-96">
+          <span>
+            {userPlaces.length} {userPlaces.length === 1 ? "place is" : "places are"} saved only on this device.
+          </span>
+          <button type="button" disabled={moving} onClick={moveLocalPlaces} className="min-h-11 shrink-0 rounded-pill bg-accent px-3 font-semibold text-accent-ink">
+            {moving ? "Moving…" : "Move to shared map"}
+          </button>
+        </div>
+      )}
+
+      {askingCode && (
+        <EditCodePrompt
+          onDone={(code) => {
+            setAskingCode(false);
+            if (code) {
+              setEditCode(code);
+              try {
+                localStorage.setItem(CODE_KEY, code);
+              } catch {}
+            }
+            codeWaiter.current?.(code);
+            codeWaiter.current = null;
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** The city of the closest saved place within ~50km, so tapped-map drops start with a sensible city. */
+function nearestCity(point: { lat: number; lng: number }, places: MapPlace[]): string {
+  let best: MapPlace | undefined;
+  let bestD = 50_000;
+  for (const p of places) {
+    const d = distanceMeters(point, p);
+    if (d < bestD) {
+      best = p;
+      bestD = d;
+    }
+  }
+  return best?.city ?? "";
+}
+
+function AddPlaceForm({
+  point,
+  defaultCity,
+  storage,
+  onSave,
+  onCancel,
+}: {
+  point: DraftPoint;
+  defaultCity: string;
+  storage: "database" | "memory";
+  onSave: (input: Omit<PlaceInput, "id">) => Promise<string | null>;
+  onCancel: () => void;
+}) {
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  // Picked from search: details are filled in already, so do not pop the keyboard.
+  useEffect(() => {
+    if (!point.name) nameRef.current?.focus();
+  }, [point.name]);
+
+  async function submit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const f = new FormData(e.currentTarget);
+    const links = String(f.get("links") ?? "")
+      .split(/\s+/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const bad = links.find((l) => !/^https:\/\/\S+\.\S+/.test(l));
+    if (bad) return setError(`“${bad}” isn't a full link. Links start with https://`);
+    const photo = String(f.get("photo") ?? "").trim();
+    if (photo && !photo.startsWith("https://")) return setError("The photo link must start with https://");
+    const name = String(f.get("name")).trim();
+    setError(null);
+    setSaving(true);
+    const err = await onSave({
+      name,
+      address: String(f.get("address") ?? "").trim() || null,
+      city: String(f.get("city") ?? "").trim(),
+      category: String(f.get("category")) as PlaceInput["category"],
+      latitude: point.lat,
+      longitude: point.lng,
+      description: String(f.get("description") ?? "").trim(),
+      photos: photo ? [{ src: photo, alt: name }] : [],
+      social: socialFromLinks(links),
+    });
+    setSaving(false);
+    if (err) setError(err);
+  }
+
+  const field = "mt-1 block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base";
+  return (
+    <form
+      onSubmit={submit}
+      aria-label="Add a place"
+      className="absolute inset-x-0 bottom-0 z-30 max-h-[85%] space-y-3 overflow-y-auto rounded-t-card bg-surface p-5 pb-6 shadow-soft sm:inset-x-auto sm:bottom-4 sm:left-4 sm:w-96 sm:rounded-card"
+    >
+      <h2 className="text-lg font-semibold">Add a place</h2>
+      <label className="block text-sm font-semibold">
+        Name
+        <input ref={nameRef} name="name" required maxLength={120} defaultValue={point.name} className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Address (optional)
+        <input name="address" maxLength={300} defaultValue={point.address} className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        City
+        <input name="city" required maxLength={100} defaultValue={point.city || defaultCity} className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Category
+        <select name="category" className={field} defaultValue={point.category ?? "food"}>
+          {CATEGORIES.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="block text-sm font-semibold">
+        TikTok, Instagram or other links (optional, one per line)
+        <textarea name="links" rows={2} inputMode="url" placeholder="https://www.tiktok.com/…" className={`${field} rounded-card`} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Photo link (optional)
+        <input name="photo" type="url" inputMode="url" placeholder="https://…/photo.jpg" className={field} />
+      </label>
+      <label className="block text-sm font-semibold">
+        Description
+        <textarea name="description" rows={2} maxLength={1000} className={`${field} rounded-card`} />
+      </label>
+      {error && (
+        <p role="alert" className="text-sm text-red-700">
+          {error}
+        </p>
+      )}
+      <p className="text-xs text-muted">
+        {storage === "database"
+          ? "Saved to the shared map, so it shows up on every device."
+          : "Demo mode: no database is connected here, so this disappears when the server restarts."}
+      </p>
+      <div className="flex gap-2">
+        <button type="submit" disabled={saving} className="min-h-11 rounded-pill bg-accent px-5 py-2 text-sm font-semibold text-accent-ink disabled:opacity-60">
+          {saving ? "Saving…" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel} className="min-h-11 rounded-pill px-5 py-2 text-sm text-muted underline">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** Asks for the edit code once per device; checks it with the server before remembering it. */
+function EditCodePrompt({ onDone }: { onDone: (code: string | null) => void }) {
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+  return (
+    <form
+      aria-label="Enter the edit code"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        const code = String(new FormData(e.currentTarget).get("code") ?? "").trim();
+        if (!code) return;
+        setChecking(true);
+        const res = await checkEditCode(code);
+        setChecking(false);
+        if (res.ok) onDone(code);
+        else setError(res.error);
+      }}
+      className="absolute inset-x-3 top-16 z-40 space-y-3 rounded-card bg-surface p-4 shadow-soft sm:right-auto sm:w-96"
+    >
+      <h2 className="text-base font-semibold">Edit code</h2>
+      <p className="text-sm text-muted">Adding or removing places needs the edit code. You only enter it once on this device.</p>
+      <input
+        ref={inputRef}
+        name="code"
+        type="password"
+        autoComplete="current-password"
+        aria-label="Edit code"
+        className="block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base"
+      />
+      {error && (
+        <p role="alert" className="text-sm text-red-700">
+          {error}
+        </p>
+      )}
+      <div className="flex gap-2">
+        <button type="submit" disabled={checking} className="min-h-11 rounded-pill bg-accent px-5 py-2 text-sm font-semibold text-accent-ink disabled:opacity-60">
+          {checking ? "Checking…" : "Continue"}
+        </button>
+        <button type="button" onClick={() => onDone(null)} className="min-h-11 rounded-pill px-5 py-2 text-sm text-muted underline">
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+const rowLink = "flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm";
+
+/** TikTok dropdown: each saved video is a thumbnail row; tapping it swaps in the official embed. */
+function TikTokSection({ place }: { place: MapPlace }) {
+  const { saved, search } = tiktokLinks(place);
+  const [playing, setPlaying] = useState<string | null>(null);
+
+  // No embeddable TikTok video for this place: show no TikTok section at all (no search link either).
+  const videos = saved.filter((l) => embedFor(l));
+  if (videos.length === 0) return null;
+  return (
+    <details
+      className="group rounded-[1.375rem] bg-accent text-accent-ink"
+      onToggle={(e) => {
+        if ((e.currentTarget as HTMLDetailsElement).open) preconnect("https://www.tiktok.com");
+      }}
+    >
+      <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+        <span>
+          TikTok
+          <span className="font-normal opacity-80">
+            {" "}
+            · {videos.length} {videos.length === 1 ? "video" : "videos"}
+          </span>
+        </span>
+        <span aria-hidden className="transition-transform group-open:rotate-180">
+          ▾
+        </span>
+      </summary>
+      <ul className="space-y-1 px-2 pb-2">
+        {[...saved, search].map((l) => (
+          <EmbedRow key={l.url} link={l} brand="TikTok" tone="accent" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+        ))}
+      </ul>
+    </details>
+  );
+}
+
+type EmbedRowProps = { link: ShownLink; brand: "TikTok" | "Instagram"; tone: "accent" | "light"; playing: boolean; onPlay: () => void; onClose: () => void };
+
+function EmbedRow({ link, brand, tone, playing, onPlay, onClose }: EmbedRowProps) {
+  const embed = embedFor(link);
+  const origin = brand === "TikTok" ? "https://www.tiktok.com" : "https://www.instagram.com";
+  const chip = tone === "accent" ? "bg-white/15 hover:bg-white/25" : "bg-tag hover:bg-line";
+  const open = (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={`grid size-11 shrink-0 place-items-center rounded-pill ${chip}`}
+    >
+      <span aria-hidden>↗</span>
+      <span className="sr-only">{link.title ? `Open “${link.title}” on ${brand} (opens in a new tab)` : `Open on ${brand} (opens in a new tab)`}</span>
+    </a>
+  );
+
+  // Not a single video (search, profile, tag, place page): a plain link row.
+  if (!embed) {
+    return (
+      <li>
+        <a href={link.url} target="_blank" rel="noopener noreferrer" className={`${rowLink} ${chip}`}>
+          <span className="line-clamp-2">{link.title ?? link.url}</span>
+          <span aria-hidden>↗</span>
+          <span className="sr-only">(opens in a new tab)</span>
+        </a>
+      </li>
+    );
+  }
+
+  return (
+    <li className={`rounded-2xl p-2 ${tone === "accent" ? "bg-white/15" : "bg-tag"}`}>
+      {playing ? (
+        <div>
+          {/* Loaded only on tap: embeds are no-store and ~1MB, so they are never pre-fetched. */}
+          <iframe
+            src={embed.src}
+            title={embed.title}
+            loading="lazy"
+            allow="autoplay; fullscreen; encrypted-media; clipboard-write"
+            allowFullScreen
+            referrerPolicy="strict-origin-when-cross-origin"
+            sandbox="allow-scripts allow-same-origin allow-popups allow-presentation"
+            className="mx-auto block h-[520px] w-full max-w-[325px] rounded-xl bg-black"
+          />
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <button type="button" onClick={onClose} className={`min-h-11 rounded-pill px-4 text-sm font-semibold ${chip}`}>
+              Close player
+            </button>
+            {open}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              preconnect(origin);
+              onPlay();
+            }}
+            className="flex min-h-14 flex-1 items-center gap-3 rounded-xl text-left"
+            aria-label={`Play: ${link.title ?? `${brand} video`}`}
+          >
+            <span className="relative block h-16 w-12 shrink-0 overflow-hidden rounded-lg bg-black/30">
+              {link.thumb && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={link.thumb} alt="" loading="lazy" decoding="async" width={48} height={64} className="size-full object-cover" />
+              )}
+              <span aria-hidden className="absolute inset-0 grid place-items-center bg-black/25 text-lg">
+                ▶
+              </span>
+            </span>
+            <span className="line-clamp-3 text-sm">{link.title ?? `${brand} video`}</span>
+          </button>
+          {open}
+        </div>
+      )}
+    </li>
+  );
+}
+
+/**
+ * Below the TikTok dropdown: Instagram search, then saved links grouped by platform (one link = a row,
+ * several = a dropdown; Instagram reels play inline), then Google search.
+ */
+function OtherLinks({ place }: { place: MapPlace }) {
+  const [playing, setPlaying] = useState<string | null>(null);
+  const groups = new Map<string, ShownLink[]>();
+  for (const l of place.links) {
+    if (l.platform === "tiktok") continue;
+    groups.set(l.platform, [...(groups.get(l.platform) ?? []), l]);
+  }
+  const plain = (l: ShownLink, tone: "light" | "nested") => (
+    <li key={l.url}>
+      <a
+        href={l.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={`flex min-h-11 items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm ${tone === "light" ? "bg-tag font-semibold" : "bg-surface"}`}
+      >
+        <span className="min-w-0 truncate">
+          {tone === "light" && platformLabel(l.platform)}
+          <span className={tone === "light" ? "font-normal text-muted" : ""}>
+            {tone === "light" ? " · " : ""}
+            {l.title ?? hostOf(l.url)}
+          </span>
+        </span>
+        <span aria-hidden>↗</span>
+        <span className="sr-only">(opens in a new tab)</span>
+      </a>
+    </li>
+  );
+  const row = (l: ShownLink, tone: "light" | "nested") =>
+    l.platform === "instagram" && embedFor(l) ? (
+      <EmbedRow key={l.url} link={l} brand="Instagram" tone="light" playing={playing === l.url} onPlay={() => setPlaying(l.url)} onClose={() => setPlaying(null)} />
+    ) : (
+      plain(l, tone)
+    );
+  return (
+    <ul className="space-y-2">
+      {plain({ platform: "instagram", url: instagramSearchUrl(place), title: `Search #${instagramTag(place)}` }, "light")}
+      {[...groups].map(([platform, links]) =>
+        links.length === 1 ? (
+          row(links[0], "light")
+        ) : (
+          <li key={platform}>
+            <details className="group rounded-[1.375rem] bg-tag">
+              <summary className="flex min-h-11 cursor-pointer list-none items-center justify-between gap-3 rounded-pill px-4 py-2 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+                <span>
+                  {platformLabel(platform)}
+                  <span className="font-normal text-muted"> · {links.length} links</span>
+                </span>
+                <span aria-hidden className="transition-transform group-open:rotate-180">
+                  ▾
+                </span>
+              </summary>
+              <ul className="space-y-1 px-2 pb-2">{links.map((l) => row(l, "nested"))}</ul>
+            </details>
+          </li>
+        ),
+      )}
+      {plain({ platform: "google", url: googleSearchUrl(place), title: `Search “${place.name}”` }, "light")}
+    </ul>
+  );
+}
+
+/** Search box for the Add flow: type a place name, pick a result, and its details and spot are filled in. */
+function PlaceSearch({
+  getNear,
+  places,
+  onPick,
+  onPickExisting,
+}: {
+  getNear: () => { lat: number; lng: number; city?: string };
+  places: MapPlace[];
+  onPick: (r: PlaceResult) => void;
+  onPickExisting: (p: MapPlace) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<PlaceResult[]>([]);
+  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => inputRef.current?.focus(), []);
+
+  useEffect(() => {
+    const term = q.trim();
+    if (term.length < 2) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setResults([]);
+      setStatus("idle");
+      return;
+    }
+    setStatus("loading");
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      try {
+        setResults(await searchPlaces(term, getNear(), { signal: ctrl.signal, googleKey: process.env.NEXT_PUBLIC_GOOGLE_PLACES_KEY || undefined }));
+        setStatus("done");
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") setStatus("error");
+      }
+    }, 300);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+    // getNear reads the live map centre; it is intentionally not a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+
+  const rows = results.map((r) => ({ r, existing: findExisting(r, places) }));
+  const choose = (row: (typeof rows)[number]) => (row.existing ? onPickExisting(row.existing) : onPick(row.r));
+
+  return (
+    <form
+      role="search"
+      aria-label="Search for a place to add"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (rows[0]) choose(rows[0]);
+      }}
+      className="absolute inset-x-3 top-16 z-20 max-h-[60%] overflow-y-auto rounded-card bg-surface p-3 shadow-soft sm:right-auto sm:w-96"
+    >
+      <input
+        ref={inputRef}
+        type="search"
+        inputMode="search"
+        enterKeyHint="search"
+        autoComplete="off"
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+        aria-label="Search for a place"
+        placeholder="Search for a place, e.g. Neptune Oyster"
+        className="block min-h-11 w-full rounded-pill border border-line bg-surface px-4 py-2 text-base"
+      />
+      <div aria-live="polite">
+        {status === "loading" && <p className="px-2 pt-3 text-sm text-muted">Searching…</p>}
+        {status === "error" && (
+          <p className="px-2 pt-3 text-sm">Search isn&apos;t available right now. You can still tap the map to drop a pin.</p>
+        )}
+        {status === "done" && rows.length === 0 && (
+          <p className="px-2 pt-3 text-sm">No matches. Try the name plus the city, or tap the map to drop a pin.</p>
+        )}
+      </div>
+      {rows.length > 0 && (
+        <ul className="mt-2 space-y-1">
+          {rows.map((row) => (
+            <li key={row.r.id}>
+              <button type="button" onClick={() => choose(row)} className="flex min-h-11 w-full items-center gap-3 rounded-2xl px-2 py-1.5 text-left hover:bg-tag">
+                <span aria-hidden className="grid size-9 shrink-0 place-items-center rounded-xl bg-tag text-lg">
+                  {CATEGORY_EMOJI[row.r.category] ?? CATEGORY_EMOJI.other}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold">{row.r.name}</span>
+                  {row.r.detail && <span className="block truncate text-xs text-muted">{row.r.detail}</span>}
+                </span>
+                {row.existing && <span className="shrink-0 rounded-pill bg-tag px-2 py-0.5 text-xs font-semibold">On the map</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="px-2 pt-3 text-xs text-muted">Or tap the map to drop a pin. Search by Photon · © OpenStreetMap contributors</p>
+    </form>
+  );
+}
