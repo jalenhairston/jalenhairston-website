@@ -57,6 +57,20 @@ export function mentionsPlace(text: string, name: string, city = ""): boolean {
   return hits >= Math.max(1, Math.ceil(tokens.length / 2));
 }
 
+/** What kind of place it is, in words a search engine understands ("restaurant", "cafe", …). */
+const CATEGORY_WORD: Record<string, string> = { food: "restaurant", coffee: "cafe", drinks: "bar", nightlife: "nightclub", shopping: "shop" };
+const KIND_WORDS = /\b(restaurant|cafe|café|coffee|bakery|pastry|izakaya|bar|pub|tavern|taproom|tap room|lounge|club|shop|store|boutique|market|books)\b/i;
+
+/**
+ * A search query with context, e.g. "Rochambeau restaurant Boston" instead of "Rochambeau Boston".
+ * The kind of place is left out when the name already says it ("Zaku Izakaya", "Green Dragon Tavern")
+ * and for landmarks, where words like "park" or "museum" are usually in the name or would mislead.
+ */
+export function searchQuery(rec: Pick<PlaceRecord, "name" | "city" | "category">): string {
+  const word = CATEGORY_WORD[rec.category];
+  return [rec.name, word && !KIND_WORDS.test(rec.name) ? word : "", rec.city].filter(Boolean).join(" ").trim();
+}
+
 // --- Photos -----------------------------------------------------------------------------------------
 
 type CommonsPage = {
@@ -83,31 +97,41 @@ async function commonsQuery(deps: EnrichDeps, params: Record<string, string>): P
 }
 
 export async function commonsPhotos(rec: PlaceRecord, deps: EnrichDeps): Promise<Photo[]> {
-  const [byName, nearby] = await Promise.all([
-    commonsQuery(deps, { generator: "search", gsrsearch: `${rec.name} ${rec.city}`, gsrnamespace: "6", gsrlimit: "15" }),
-    commonsQuery(deps, { generator: "geosearch", ggscoord: `${rec.latitude}|${rec.longitude}`, ggsradius: "150", ggsnamespace: "6", ggslimit: "20" }),
-  ]);
   // Landmarks (parks, museums, streets) can use nearby photos; businesses need the name in the file title.
   const landmark = rec.category === "outdoors" || rec.category === "culture";
   const out: Photo[] = [];
   const seen = new Set<string>();
-  for (const page of [...byName, ...nearby]) {
-    if (out.length >= MAX_PHOTOS || seen.has(page.title)) continue;
-    const info = page.imageinfo?.[0];
-    if (!info?.thumburl || !/^image\/(jpeg|png|webp)$/.test(info.mime ?? "")) continue;
-    const title = page.title.replace(/^File:/, "").replace(/\.[a-z]+$/i, "");
-    const c = page.coordinates?.[0];
-    const near = c ? distanceMeters({ lat: c.lat, lng: c.lon }, { lat: rec.latitude, lng: rec.longitude }) <= 80 : false;
-    if (!mentionsPlace(title, rec.name, rec.city) && !(landmark && near)) continue;
-    seen.add(page.title);
-    const license = info.extmetadata?.LicenseShortName?.value;
-    out.push({
-      src: info.thumburl.split("?")[0],
-      alt: rec.name,
-      credit: `${license ? `${license} ` : ""}via Wikimedia Commons`.trim(),
-      ...(info.descriptionurl ? { creditUrl: info.descriptionurl } : {}),
-    });
-  }
+  const take = (pages: CommonsPage[]) => {
+    for (const page of pages) {
+      if (out.length >= MAX_PHOTOS || seen.has(page.title)) continue;
+      const info = page.imageinfo?.[0];
+      if (!info?.thumburl || !/^image\/(jpeg|png|webp)$/.test(info.mime ?? "")) continue;
+      const title = page.title.replace(/^File:/, "").replace(/\.[a-z]+$/i, "");
+      const c = page.coordinates?.[0];
+      const near = c ? distanceMeters({ lat: c.lat, lng: c.lon }, { lat: rec.latitude, lng: rec.longitude }) <= 80 : false;
+      if (!mentionsPlace(title, rec.name, rec.city) && !(landmark && near)) continue;
+      seen.add(page.title);
+      const license = info.extmetadata?.LicenseShortName?.value;
+      out.push({
+        src: info.thumburl.split("?")[0],
+        alt: rec.name,
+        credit: `${license ? `${license} ` : ""}via Wikimedia Commons`.trim(),
+        ...(info.descriptionurl ? { creditUrl: info.descriptionurl } : {}),
+      });
+    }
+  };
+  const search = (q: string) => commonsQuery(deps, { generator: "search", gsrsearch: q, gsrnamespace: "6", gsrlimit: "15" });
+  // Commons search needs every word to match, so try the query with context first ("Rochambeau restaurant
+  // Boston") and fall back to just the name and city when that finds nothing usable.
+  const contextual = searchQuery(rec);
+  const plain = `${rec.name} ${rec.city}`.trim();
+  const [first, nearby] = await Promise.all([
+    search(contextual),
+    commonsQuery(deps, { generator: "geosearch", ggscoord: `${rec.latitude}|${rec.longitude}`, ggsradius: "150", ggsnamespace: "6", ggslimit: "20" }),
+  ]);
+  take(first);
+  if (out.length === 0 && plain !== contextual) take(await search(plain));
+  take(nearby);
   return out;
 }
 
@@ -129,7 +153,7 @@ export async function googlePlace(rec: PlaceRecord, deps: EnrichDeps): Promise<{
       "x-goog-fieldmask": "places.id,places.displayName,places.location,places.photos",
     },
     body: JSON.stringify({
-      textQuery: `${rec.name} ${rec.city}`.trim(),
+      textQuery: searchQuery(rec),
       maxResultCount: 5,
       locationBias: { circle: { center: { latitude: rec.latitude, longitude: rec.longitude }, radius: 500 } },
     }),
@@ -163,7 +187,7 @@ export async function googlePlace(rec: PlaceRecord, deps: EnrichDeps): Promise<{
 export async function searchTikTokLinks(rec: PlaceRecord, deps: EnrichDeps): Promise<string[]> {
   if (!deps.braveKey) return [];
   const u = new URL("https://api.search.brave.com/res/v1/web/search");
-  u.searchParams.set("q", `${rec.name} ${rec.city} site:tiktok.com`);
+  u.searchParams.set("q", `${searchQuery(rec)} site:tiktok.com`);
   u.searchParams.set("count", "20");
   const res = await deps.fetch(u, { headers: { accept: "application/json", "x-subscription-token": deps.braveKey } });
   if (!res.ok) throw new Error(`brave ${res.status}`);

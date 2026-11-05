@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { enrichPlace, mentionsPlace, nameTokens, type EnrichDeps } from "./enrich";
+import { enrichPlace, mentionsPlace, nameTokens, searchQuery, type EnrichDeps } from "./enrich";
 import type { PlaceRecord } from "./places-model";
 
 const place = (over: Partial<PlaceRecord> = {}): PlaceRecord => ({
@@ -193,5 +193,44 @@ describe("Wikimedia rate limits", () => {
     const r = await enrichPlace(place(), { fetch: f, sleep: async (ms) => void waits.push(ms) });
     expect(r.enrichment.photos).toBe("commons");
     expect(waits).toEqual([2000, 2000]); // honoured Retry-After for both throttled requests
+  });
+});
+
+describe("search context", () => {
+  it("adds what kind of place it is, unless the name already says so or it is a landmark", () => {
+    expect(searchQuery({ name: "Rochambeau", city: "Boston", category: "food" })).toBe("Rochambeau restaurant Boston");
+    expect(searchQuery({ name: "Lola 42", city: "Boston", category: "food" })).toBe("Lola 42 restaurant Boston");
+    expect(searchQuery({ name: "Sam Adams Tap Room", city: "Boston", category: "drinks" })).toBe("Sam Adams Tap Room Boston");
+    expect(searchQuery({ name: "Zaku Izakaya", city: "Boston", category: "food" })).toBe("Zaku Izakaya Boston");
+    expect(searchQuery({ name: "Covet Boutique", city: "Boston", category: "shopping" })).toBe("Covet Boutique Boston");
+    expect(searchQuery({ name: "Village Silversmith", city: "Gloucester", category: "shopping" })).toBe("Village Silversmith shop Gloucester");
+    expect(searchQuery({ name: "Acorn Street", city: "Boston", category: "outdoors" })).toBe("Acorn Street Boston");
+    expect(searchQuery({ name: "Museum of Fine Arts", city: "Boston", category: "culture" })).toBe("Museum of Fine Arts Boston");
+  });
+
+  it("is used for Google, Brave and Commons; Commons retries without it when nothing matches", async () => {
+    const seen: { google?: string; brave?: string; commons: string[] } = { commons: [] };
+    const f = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const ok = (body: unknown) => ({ ok: true, status: 200, headers: new Headers(), json: async () => body }) as unknown as Response;
+      if (url.includes("commons")) {
+        const q = new URL(url).searchParams.get("gsrsearch");
+        if (q) seen.commons.push(q);
+        return ok({ query: { pages: {} } });
+      }
+      if (url.includes("googleapis")) {
+        seen.google = JSON.parse(String(init?.body)).textQuery;
+        return ok({ places: [] });
+      }
+      if (url.includes("brave")) {
+        seen.brave = new URL(url).searchParams.get("q") ?? undefined;
+        return ok({ web: { results: [] } });
+      }
+      return { ok: false, status: 404 } as unknown as Response;
+    }) as unknown as typeof fetch;
+    await enrichPlace(place({ name: "Rochambeau" }), { fetch: f, googleKey: "G", braveKey: "B" });
+    expect(seen.commons).toEqual(["Rochambeau restaurant Boston", "Rochambeau Boston"]);
+    expect(seen.google).toBe("Rochambeau restaurant Boston");
+    expect(seen.brave).toBe("Rochambeau restaurant Boston site:tiktok.com");
   });
 });

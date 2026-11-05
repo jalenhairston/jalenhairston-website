@@ -107,7 +107,11 @@ After every new place (and every place moved from a device), `createPlace`/`impo
 
 Results and notes (e.g. "TikTok search is off (BRAVE_SEARCH_API_KEY is not set)") are stored on the place (`enrichment`, `enriched_at`), then the cached list is expired (`revalidateTag("places", { expire: 0 })`). The card shows "Looking for photos and TikToks…" and checks back (`getPlaceStatus`) until the run finishes. Places still missing something show **Find photos & TikToks** (edit code required; runs immediately).
 
-**Backfill existing places:** `DATABASE_URL=… BRAVE_SEARCH_API_KEY=… GOOGLE_PLACES_SERVER_KEY=… PLACES_EDIT_CODE=… npm run places:enrich -- --site https://<your-site>` (add `--all` to retry places that were already tried). `--site` calls `POST /api/places/revalidate` (edit code in `x-edit-code`) so the live list refreshes.
+**Search context.** Queries include what kind of place it is, e.g. "Rochambeau restaurant Boston" rather than "Rochambeau Boston" (food → restaurant, coffee → cafe, drinks → bar, nightlife → nightclub, shopping → shop). It is skipped when the name already says it ("Zaku Izakaya", "Green Dragon Tavern") and for landmarks. Google and Brave always use it; Commons search requires every word to match, so it tries the contextual query first and falls back to name + city when that finds nothing usable.
+
+**Fully automatic.** New and moved places are enriched right after saving. Places that existed before the pipeline (and any that were never looked up) are enriched on the next deploy: `vercel-build` runs `places:enrich -- --soft --budget 240` before `next build`, so the page is built with the results. It never fails the deploy and stops starting new lookups after ~4 minutes; leftovers are picked up next deploy. Each place is looked up once (`enriched_at`); the card's button is only for retries.
+
+**Backfill existing places manually:** `DATABASE_URL=… BRAVE_SEARCH_API_KEY=… GOOGLE_PLACES_SERVER_KEY=… PLACES_EDIT_CODE=… npm run places:enrich -- --site https://<your-site>` (add `--all` to retry places that were already tried). `--site` calls `POST /api/places/revalidate` (edit code in `x-edit-code`) so the live list refreshes.
 
 **Keys (Vercel env, server-only, no `NEXT_PUBLIC_`):**
 - `BRAVE_SEARCH_API_KEY`: https://api.search.brave.com (check current free allowance).
